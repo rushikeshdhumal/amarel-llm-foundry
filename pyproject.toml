@@ -4,10 +4,11 @@ version = "0.1.0"
 description = "5-phase LLM training project on Amarel HPC"
 authors = [{name = "Rushikesh Dhumal", email = "r.dhumal@rutgers.edu"}]
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
-    "torch>=2.1.0",
-    "numpy>=1.24.0",
+    "torch>=2.6.0",
+    "torchvision>=0.21.0",
+    "numpy>=1.24,<2.0",
     "tiktoken>=0.5.0",
     "omegaconf>=2.3.0",
     "datasets>=2.14.0",

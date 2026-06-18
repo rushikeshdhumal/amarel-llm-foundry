@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+*.whl
+
+# PyTorch
+*.pt
+*.pth
+*.bin
+checkpoints/
+runs/
+logs/
+
+# Data
+data/
+*.csv
+*.jsonl
+*.txt
+!requirements.txt
+
+# SLURM
+*.out
+*.err
+slurm-*.out
+slurm-*.err
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment
+venv/
+.env
+.venv
+
+# OS
+.DS_Store
+Thumbs.db

@@ -10,6 +10,7 @@
 - **Optimization**: Use `torch.compile` for single-GPU. Use `torch.cuda.amp` autocast for all multi-GPU runs.
 - **Checkpointing**: Save `model.pt`, `optimizer.pt`, and `config.yaml` every 500 steps. Save to `checkpoints/run_{timestamp}/`.
 - **Resume**: All training scripts must accept `--resume` flag.
+- **Gradient clipping**: Always clip gradients with `torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)`. Set `grad_clip` in config; never hard-code.
 
 ## 3. Data
 - **Tokenizer**: Use `tiktoken` (GPT-2 encoding). Max sequence length = 1024.

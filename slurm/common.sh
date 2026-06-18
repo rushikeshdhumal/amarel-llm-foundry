@@ -2,7 +2,11 @@
 # Amarel shared environment for all SLURM scripts
 
 # Module loads
-module load cuda/12.1 python/3.10
+module use /projects/community/modulefiles
+module load cuda/12.8.1
+module load anaconda/2025.06-ts840
+source "$(conda info --base)/etc/profile.d/conda.sh"
+conda activate llm
 
 # Scratch space (use for datasets & checkpoints)
 export SCRATCH=/scratch/$USER

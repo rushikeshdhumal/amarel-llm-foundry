@@ -1,0 +1,21 @@
+# Phase 01 — GPT-2 124M (single GPU)
+# Inherits base_config.yaml via OmegaConf.merge at runtime.
+# Values here override base_config.yaml where they differ.
+
+# Model architecture
+n_layer: 12
+n_head: 12
+n_embd: 768
+dropout: 0.1
+
+# Training — overrides base
+batch_size: 64          # L40S has 48 GB VRAM; bs=64 fits comfortably with AMP
+learning_rate: 3.0e-4
+grad_clip: 1.0          # clips before optimizer step; norm logged separately
+
+# Logging — overrides base
+grad_norm_log_interval: 100   # log gradient norm every N steps
+
+# Data
+data_path: ???          # set at runtime: $SCRATCH/data/tinystories/
+                        # or pass via --config override: data_path=/scratch/$USER/data/tinystories

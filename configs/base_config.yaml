@@ -1,0 +1,16 @@
+# Global constants inherited by all phases
+seed: 42
+seq_len: 1024
+vocab_size: 50257  # GPT-2 tiktoken
+
+# Training defaults
+batch_size: 32
+learning_rate: 3.0e-4
+weight_decay: 0.1
+warmup_steps: 2000
+max_steps: 100000
+
+# Logging
+log_interval: 10
+eval_interval: 500
+save_interval: 1000

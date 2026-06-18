@@ -1,0 +1,24 @@
+[project]
+name = "amarel-llm-foundry"
+version = "0.1.0"
+description = "5-phase LLM training project on Amarel HPC"
+authors = [{name = "Rushikesh Dhumal", email = "r.dhumal@rutgers.edu"}]
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.1.0",
+    "numpy>=1.24.0",
+    "tiktoken>=0.5.0",
+    "omegaconf>=2.3.0",
+    "datasets>=2.14.0",
+    "wandb>=0.15.0",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = "-ra -q"
+testpaths = ["tests"]

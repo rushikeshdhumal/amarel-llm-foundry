@@ -1,0 +1,8 @@
+# Phase 00 – runtime dependencies
+# Install: pip install -r requirements.txt --index-url https://download.pytorch.org/whl/cu124
+#
+# numpy must stay <2.0: the Amarel login node has GCC 4.8.5 which cannot
+# compile numpy 2.x from source. conda install numpy is preferred.
+torch>=2.6.0
+torchvision>=0.21.0
+numpy>=1.24,<2.0

@@ -2,11 +2,23 @@
 # Amarel shared environment for all SLURM scripts
 
 # Module loads
+# Use absolute paths to initialise the module system and CUDA in SLURM batch
+# jobs, where /etc/profile.d is not automatically sourced.
+# shellcheck source=/dev/null
+source /etc/profile.d/modules.sh 2>/dev/null || true
 module use /projects/community/modulefiles
 module load cuda/12.8.1
-module load anaconda/2025.06-ts840
-source "$(conda info --base)/etc/profile.d/conda.sh"
+
+# Activate the project conda environment.
+# We source the conda init script with its absolute path rather than relying
+# on `module load anaconda` because the module function may not be available
+# in non-interactive SLURM batch scripts.
+CONDA_BASE=/projects/community/anaconda/2025.06/ts840
+source "$CONDA_BASE/etc/profile.d/conda.sh"
 conda activate llm
+
+# Force unbuffered Python output so print() lines appear immediately in .out
+export PYTHONUNBUFFERED=1
 
 # Scratch space (use for datasets & checkpoints)
 export SCRATCH=/scratch/$USER

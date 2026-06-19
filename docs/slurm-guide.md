@@ -99,6 +99,37 @@ cat hello_1n1g_<JOBID>.err
 sacct -j <JOBID> --format=JobID,State,ExitCode,Elapsed,MaxRSS
 ```
 
+## Finding Completed Jobs (when you don't have the job ID)
+
+`squeue` only shows active (running/pending) jobs. For completed, failed, or timed-out jobs use `sacct`, which queries the SLURM accounting database.
+
+```bash
+# All your jobs from the last 24 hours (default window)
+sacct -u $USER
+
+# Last 7 days with the most useful columns
+sacct -u $USER --starttime=now-7days \
+      --format=JobID,JobName,State,ExitCode,Elapsed,Start,End
+
+# Filter by outcome
+sacct -u $USER --starttime=now-7days --state=COMPLETED,FAILED,TIMEOUT
+```
+
+### `sacct` State values
+
+| State | Meaning |
+|---|---|
+| `COMPLETED` | Exited cleanly (exit code 0) |
+| `FAILED` | Non-zero exit code — check `.err` file |
+| `TIMEOUT` | Hit the `--time` wall-clock limit |
+| `CANCELLED` | Cancelled by user (`scancel`) or admin |
+| `OUT_OF_MEMORY` | Job was killed by the OOM killer |
+
+Once you find the job ID, get full detail:
+```bash
+sacct -j <JOBID> --format=JobID,State,ExitCode,Elapsed,MaxRSS,NodeList
+```
+
 ---
 
 ## Cancelling Jobs

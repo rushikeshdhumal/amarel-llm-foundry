@@ -11,7 +11,7 @@
 #SBATCH --cpus-per-task=4       # 4 CPUs: 2 for DataLoader workers + 2 headroom
 #SBATCH --gres=gpu:1
 #SBATCH --mem=48G               # model + activations + data buffers; L40S node has 256G+
-#SBATCH --time=04:00:00         # 4-hour wall-clock limit; extend if needed
+#SBATCH --time=16:00:00         # ~100k steps at bs=16 takes ~15h; 16h gives buffer
 #SBATCH --output=%x_%j.out      # stdout → gpt_1gpu_<JOBID>.out
 #SBATCH --error=%x_%j.err       # stderr → gpt_1gpu_<JOBID>.err
 #SBATCH --export=ALL

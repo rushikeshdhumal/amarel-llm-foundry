@@ -14,7 +14,60 @@
 
 ---
 
-## Phase 0 — HPC Distributed Baseline `(current)`
+## Phase 1 — NanoGPT Transformer `(current)`
+
+**Branch**: `feature/01-nanogpt-transformer`
+
+**Goal**: Implement a GPT-2 124M decoder-only transformer from scratch and train it on TinyStories on a single GPU.
+
+### What was built
+
+| File | Purpose |
+| :--- | :--- |
+| `src/tokenizer.py` | tiktoken GPT-2 BPE wrapper |
+| `src/data_utils.py` | Streaming `IterableDataset` over TinyStories `.txt` files |
+| `src/model.py` | Full GPT: `CausalSelfAttention` → `MLP` → `TransformerBlock` → `GPT` (124.4M params) |
+| `src/train_single_gpu.py` | Training loop: AMP, cosine LR schedule, grad clipping, checkpointing, `--resume` |
+| `configs/phase1_124M.yaml` | Phase hyperparameters: `n_layer=12`, `n_head=12`, `n_embd=768`, `bs=16` |
+| `slurm/train_1gpu.sh` | Single-GPU SLURM job (16h wall clock) |
+| `docs/torch_notes.md` | PyTorch gotchas encountered during development |
+
+### Acceptance criteria
+
+- [x] `model.py` forward pass runs without shape errors for a dummy batch (`bs=4, seq=1024`)
+- [ ] Single-batch overfit test: loss drops to < 0.01 within 100 steps
+- [ ] Full training on TinyStories for 1 hour produces coherent text completions
+- [x] Checkpoints saved to `checkpoints/run_{timestamp}/` with `model.pt`, `config.yaml`, `optimizer.pt`
+- [x] Training script accepts `--config` and `--resume` flags
+- [ ] Gradient norms logged every `grad_norm_log_interval` steps
+
+### Training log
+
+| Run | Steps | Best loss | Notes |
+| :--- | :--- | :--- | :--- |
+| Run 1 | 0 → 27,500 | **1.2557** (step 26,600) | Killed by 4h wall-clock limit; resumed from step 27,500 |
+
+### Environment
+
+| Item | Value |
+| :--- | :--- |
+| Cluster | Amarel (OARC, Rutgers University) |
+| GPU | NVIDIA L40S / A100-PCIE-40GB (40 GB) |
+| CUDA | 12.8.1 |
+| PyTorch | 2.6.0+cu124 |
+| Python | 3.11 (conda env `llm`) |
+
+### Resuming training
+
+```bash
+cd /scratch/$USER/amarel-llm-foundry
+git pull origin feature/01-nanogpt-transformer
+sbatch slurm/train_1gpu.sh --resume $CHECKPOINT_DIR/run_<timestamp>/step_<N>
+```
+
+---
+
+## Phase 0 — HPC Distributed Baseline
 
 **Branch**: `feature/00-hpc-distributed-baseline`
 
@@ -34,7 +87,7 @@
 ### Acceptance criteria
 
 - [x] `hello_1node_1gpu.sh` — `[Rank 0/1] Host: gpu030.amarel.rutgers.edu  device=NVIDIA L40S`
-- [ ] `hello_1node_4gpu.sh` — ranks 0–3 all on the same hostname
+- [x] `hello_1node_4gpu.sh` — ranks 0–3 all on `gpuk002.amarel.rutgers.edu` (NVIDIA A100-PCIE-40GB)
 - [ ] `hello_2nodes_4gpu.sh` — ranks distributed across 2 distinct hostnames
 
 ### Environment

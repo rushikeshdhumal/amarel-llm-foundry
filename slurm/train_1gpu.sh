@@ -19,7 +19,7 @@
 # ── Environment ───────────────────────────────────────────────────────────────
 # common.sh loads cuda/12.8.1, activates the llm conda env, exports $SCRATCH,
 # and sets all NCCL variables. Must be sourced before any Python call.
-source "$(dirname "$0")/common.sh"
+source "$SLURM_SUBMIT_DIR/slurm/common.sh"
 
 # ── Verify dataset exists before requesting GPU time ─────────────────────────
 # Fail fast here rather than 30 minutes into a job when the DataLoader crashes.

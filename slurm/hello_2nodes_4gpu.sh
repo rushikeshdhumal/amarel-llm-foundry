@@ -12,7 +12,7 @@
 #SBATCH --export=ALL
 
 # ── Environment ───────────────────────────────────────────────────────────────
-source "$(dirname "$0")/common.sh"
+source "$SLURM_SUBMIT_DIR/slurm/common.sh"
 
 # ── Resolve master address (first node in allocation) ────────────────────────
 # scontrol expands compact notation like node[001-002] → node001\nnode002

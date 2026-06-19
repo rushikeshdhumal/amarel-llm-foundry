@@ -59,6 +59,7 @@ from datetime import datetime
 from pathlib import Path
 
 import torch
+import torch._dynamo
 import torch.nn as nn
 from omegaconf import OmegaConf, DictConfig
 
@@ -255,7 +256,6 @@ def train(cfg: DictConfig, resume_dir: Path | None = None) -> None:
         if cap[0] >= 8:
             print(f"Compiling model (GPU capability sm_{cap[0]}{cap[1]})...")
             try:
-                import torch._dynamo
                 # Suppress inductor errors (e.g. old GCC missing stdatomic.h)
                 # and fall back to eager execution automatically.
                 torch._dynamo.config.suppress_errors = True
@@ -283,7 +283,6 @@ def train(cfg: DictConfig, resume_dir: Path | None = None) -> None:
         model = GPT(model_cfg).to(device)
         if device.type == "cuda" and torch.cuda.get_device_capability()[0] >= 8:
             try:
-                import torch._dynamo
                 torch._dynamo.config.suppress_errors = True
                 model = torch.compile(model)
             except Exception:

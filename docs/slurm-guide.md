@@ -143,6 +143,42 @@ All scripts in `slurm/` follow these rules (enforced by `slurm/common.sh`):
 
 ---
 
+## Job Dependencies
+
+SLURM makes **no guarantee** about submission order. Each job is scheduled independently based on priority, wait time, and resource availability. A smaller job (1 node) will typically start before a larger one (2 nodes) regardless of submission order.
+
+To chain jobs so that Job B only starts after Job A succeeds:
+
+```bash
+# Submit Job A, capture its job ID
+JOB_A=$(sbatch job_a.sh | awk '{print $NF}')
+
+# Submit Job B with a dependency on Job A
+sbatch --dependency=afterok:$JOB_A job_b.sh
+```
+
+### Dependency types
+
+| Flag | Meaning |
+|---|---|
+| `afterok:<jobid>` | Start only if the dependency completed with exit code 0 |
+| `afternotok:<jobid>` | Start only if the dependency failed |
+| `afterany:<jobid>` | Start after the dependency finishes, regardless of exit code |
+| `after:<jobid>` | Start after the dependency has begun (not necessarily finished) |
+
+### Chaining multiple jobs (e.g. pipeline)
+
+```bash
+JOB1=$(sbatch preprocess.sh | awk '{print $NF}')
+JOB2=$(sbatch --dependency=afterok:$JOB1 train.sh | awk '{print $NF}')
+JOB3=$(sbatch --dependency=afterok:$JOB2 evaluate.sh | awk '{print $NF}')
+echo "Pipeline: $JOB1 → $JOB2 → $JOB3"
+```
+
+If a job in the chain fails, all downstream jobs with `afterok` dependencies are automatically cancelled.
+
+---
+
 ## Quick Troubleshooting
 
 | Symptom | Fix |

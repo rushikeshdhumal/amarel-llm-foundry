@@ -9,9 +9,14 @@ n_embd: 768
 dropout: 0.1
 
 # Training — overrides base
-batch_size: 64          # L40S has 48 GB VRAM; bs=64 fits comfortably with AMP
+# bs=16: attention scores are (B, n_head, T, T) per layer → 12 × B × 12 × 1024²
+# At bs=64 that's ~19 GB just for attention; bs=16 brings it to ~4.7 GB.
+batch_size: 16
 learning_rate: 3.0e-4
 grad_clip: 1.0          # clips before optimizer step; norm logged separately
+
+# torch.compile requires GCC >= 4.9 (stdatomic.h). Set false on this cluster.
+use_compile: false
 
 # Logging — overrides base
 grad_norm_log_interval: 100   # log gradient norm every N steps

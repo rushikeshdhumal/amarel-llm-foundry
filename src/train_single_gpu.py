@@ -243,13 +243,24 @@ def train(cfg: DictConfig, resume_dir: Path | None = None) -> None:
     # ── torch.compile ─────────────────────────────────────────────────────────
     # Only compile on Ampere (sm_80) or newer. L40S is sm_89, so this fires.
     # Compilation takes ~1-2 min on first run but speeds up all subsequent steps.
+    #
+    # IMPORTANT: torch.compile uses TorchInductor, which JIT-compiles C/CUDA
+    # kernels at runtime using the system GCC. If GCC is too old (< 4.9) it
+    # will fail on the first forward pass — NOT at the torch.compile() call —
+    # because compilation is lazy. Setting suppress_errors=True tells dynamo
+    # to silently fall back to eager mode on any compilation failure instead
+    # of crashing. This is safe: eager mode is just slightly slower.
     if device.type == "cuda":
         cap = torch.cuda.get_device_capability()
         if cap[0] >= 8:
             print(f"Compiling model (GPU capability sm_{cap[0]}{cap[1]})...")
             try:
+                import torch._dynamo
+                # Suppress inductor errors (e.g. old GCC missing stdatomic.h)
+                # and fall back to eager execution automatically.
+                torch._dynamo.config.suppress_errors = True
                 model = torch.compile(model)
-                print("torch.compile: enabled")
+                print("torch.compile: enabled (errors suppressed → eager fallback)")
             except Exception as e:
                 print(f"torch.compile failed ({e}), falling back to eager mode")
         else:
@@ -272,6 +283,8 @@ def train(cfg: DictConfig, resume_dir: Path | None = None) -> None:
         model = GPT(model_cfg).to(device)
         if device.type == "cuda" and torch.cuda.get_device_capability()[0] >= 8:
             try:
+                import torch._dynamo
+                torch._dynamo.config.suppress_errors = True
                 model = torch.compile(model)
             except Exception:
                 pass

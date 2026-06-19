@@ -32,7 +32,8 @@ export NCCL_IB_DISABLE=1
 export NCCL_SOCKET_IFNAME=eth0
 export NCCL_TIMEOUT=1800
 
-# PyTorch distributed
+# PyTorch memory and distributed settings
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TORCH_DISTRIBUTED_DEBUG=DETAIL
 export TORCH_CPP_LOG_LEVEL=INFO
 

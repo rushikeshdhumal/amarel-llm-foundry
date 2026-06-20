@@ -204,11 +204,17 @@ def run_overfit_test(model: GPT, device: torch.device) -> None:
     x = torch.randint(0, model.config.vocab_size, (BATCH, SEQ), device=device)
     y = torch.randint(0, model.config.vocab_size, (BATCH, SEQ), device=device)
 
-    opt = torch.optim.AdamW(model.parameters(), lr=LR)
+    # weight_decay=0.0 is critical here: AdamW's default weight decay (0.01)
+    # adds an L2 penalty that shrinks weights toward zero, creating a loss
+    # floor that prevents memorisation. For an overfit test we want pure
+    # gradient descent toward zero loss, so regularisation must be off.
+    opt = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=0.0)
 
     for step in range(STEPS):
-        _, loss = model(x, y)
+        # zero_grad before forward so every step starts with a clean gradient
+        # slate — the conventional PyTorch idiom and safe against any hooks.
         opt.zero_grad()
+        _, loss = model(x, y)
         loss.backward()
         opt.step()
         if (step + 1) % 30 == 0:
@@ -220,6 +226,10 @@ def run_overfit_test(model: GPT, device: torch.device) -> None:
     else:
         print(f"  ✗ Overfit test FAILED (final loss = {final_loss:.4f} > {THRESHOLD})")
         print("    Check model forward pass and weight initialisation.\n")
+
+    # Restore train mode so the caller's model state is consistent whether or
+    # not it re-initialises the model after this function returns.
+    model.train()
 
 
 # ── Build optimizer ────────────────────────────────────────────────────────────

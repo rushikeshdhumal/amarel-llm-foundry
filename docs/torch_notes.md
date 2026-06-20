@@ -77,7 +77,7 @@ Halving `T` or `B` quarters the attention memory. This is why FlashAttention (Ph
 
 ---
 
-## 7. `torch.cuda.set_device()` must be called *before* `init_process_group()`
+## 6. `torch.cuda.set_device()` must be called *before* `init_process_group()`
 
 **What happened:** A 2-node NCCL job failed immediately at the first `dist.barrier()` with `ncclInvalidUsage`. The `.err` file also warned: *"using GPU 0 to perform barrier as devices used by this process are currently unknown"*.
 
@@ -97,7 +97,7 @@ dist.init_process_group(backend="nccl")
 
 ---
 
-## 8. Pass `device_id` to `init_process_group()` in PyTorch 2.x
+## 7. Pass `device_id` to `init_process_group()` in PyTorch 2.x
 
 **What happened:** Even after fixing the ordering above, PyTorch still logged a warning that it was "guessing" the GPU for the barrier.
 
@@ -118,7 +118,7 @@ dist.init_process_group(
 
 ---
 
-## 9. `dirname "$0"` is unreliable in SLURM batch jobs
+## 8. `dirname "$0"` is unreliable in SLURM batch jobs
 
 **What happened:** `source "$(dirname "$0")/common.sh"` silently failed, leaving `$SCRATCH` unset.
 
@@ -131,7 +131,7 @@ source "$SLURM_SUBMIT_DIR/slurm/common.sh"
 
 ---
 
-## 10. Overfit test batch size must match model capacity, not training config
+## 9. Overfit test batch size must match model capacity, not training config
 
 **What happened:** A single-batch overfit test on a 124M model with `bs=4, seq=1024` ran for 100 steps at `lr=1e-3` and only reached loss 5.26 — reporting failure even though the model was correct (full training later converged to 1.03).
 

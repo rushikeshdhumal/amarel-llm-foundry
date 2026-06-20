@@ -27,9 +27,15 @@ export CHECKPOINT_DIR=$SCRATCH/checkpoints
 export LOG_DIR=$SCRATCH/logs
 
 # NCCL tuning for multi-node
-export NCCL_ASYNC_ERROR_HANDLING=1
+# PyTorch 2.x renamed NCCL_ASYNC_ERROR_HANDLING → TORCH_NCCL_ASYNC_ERROR_HANDLING.
+export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
 export NCCL_IB_DISABLE=1
-export NCCL_SOCKET_IFNAME=eth0
+# Do NOT hardcode eth0 — Amarel GPU nodes use unpredictable interface names
+# (e.g. ens, enp, bond). The ^ prefix tells NCCL to exclude loopback and
+# docker bridges and auto-select from whatever remains.
+export NCCL_SOCKET_IFNAME=^lo,^docker
+# Emit NCCL warnings to stderr; helps diagnose interface/port issues.
+export NCCL_DEBUG=WARN
 export NCCL_TIMEOUT=1800
 
 # PyTorch memory and distributed settings

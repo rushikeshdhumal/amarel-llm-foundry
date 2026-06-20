@@ -185,7 +185,13 @@ def run_overfit_test(model: GPT, device: torch.device) -> None:
     incorrect loss computation, or bad weight initialisation.
     """
     STEPS = 150
-    LR = 1e-2      # aggressive: we want fast convergence, not generalisation
+    # LR = 0.1, not 1e-2. Here is why:
+    # Adam's maximum logit movement per step ≈ LR. To drive loss near-zero,
+    # each correct token's logit must increase by ~log(vocab_size × 100) ≈ 15
+    # units (enough for softmax to assign ~99% probability to the right token).
+    #   0.01 × 150 steps = 1.5  → plateau at loss ~3   (not enough)
+    #   0.10 × 150 steps = 15   → converges to < 0.01  (just right)
+    LR = 0.1
     SEQ = 32       # short sequences → only 128 targets to memorise
     BATCH = 4
     THRESHOLD = 0.01

@@ -99,6 +99,37 @@ cat hello_1n1g_<JOBID>.err
 sacct -j <JOBID> --format=JobID,State,ExitCode,Elapsed,MaxRSS
 ```
 
+### Inspecting a completed training job (without reading 100k lines)
+
+Training jobs write one log line per step. Use these targeted commands instead of reading the whole file.
+
+```bash
+OUT=<JOBNAME>_<JOBID>.out
+
+# 1. Did it finish cleanly? See the last 50 lines.
+tail -50 $OUT
+
+# 2. Best (lowest) loss across the entire run.
+#    -F'|' splits on pipe; field 2 is " loss X.XXXX "; sort -n reads the leading number.
+grep "^step" $OUT | awk -F'|' '{print $2, $0}' | sort -n | head -5 | cut -d' ' -f3-
+
+# 3. One-liner summary: first steps, last steps, best loss.
+echo "=== First 3 steps ===" && grep "^step" $OUT | head -3
+echo "=== Last 3 steps ===" && grep "^step" $OUT | tail -3
+echo "=== Best loss ===" && grep "^step" $OUT | sort -t'|' -k2 -n | head -1
+
+# 4. Sparse loss curve — every 10th logged step (good for a quick trend).
+grep "^step" $OUT | awk 'NR % 10 == 0 {print NR, $2, $4}'
+
+# 5. All checkpoint saves.
+grep -i "checkpoint\|saved\|saving" $OUT
+
+# 6. Any errors, warnings, or OOM events (check both .out and .err).
+grep -i "error\|warn\|killed\|oom\|traceback" $OUT gpt_1gpu_<JOBID>.err
+```
+
+> **Tip:** The `.err` file is normally empty on a clean run. Any content there is worth reading immediately.
+
 ## Finding Completed Jobs (when you don't have the job ID)
 
 `squeue` only shows active (running/pending) jobs. For completed, failed, or timed-out jobs use `sacct`, which queries the SLURM accounting database.
@@ -167,10 +198,28 @@ All scripts in `slurm/` follow these rules (enforced by `slurm/common.sh`):
 
 | Variable | Value | Why |
 |---|---|---|
-| `NCCL_ASYNC_ERROR_HANDLING` | `1` | Surfaces clear errors instead of hanging |
+| `TORCH_NCCL_ASYNC_ERROR_HANDLING` | `1` | Surfaces clear errors instead of hanging (PyTorch 2.x name; old name was `NCCL_ASYNC_ERROR_HANDLING`) |
 | `NCCL_IB_DISABLE` | `1` | Amarel uses Ethernet, not InfiniBand |
-| `NCCL_SOCKET_IFNAME` | `eth0` | Force NCCL to use the correct NIC (verify with `ip a` on compute node if multi-node hangs) |
+| `NCCL_SOCKET_IFNAME` | `^lo,^docker` | Exclude loopback/docker; let NCCL auto-select the real NIC |
+| `NCCL_DEBUG` | `WARN` | Print NCCL warnings to `.err`; helps diagnose interface/port issues |
 | `NCCL_TIMEOUT` | `1800` | 30-min timeout for slow cross-node init |
+
+### Why `NCCL_SOCKET_IFNAME=eth0` is dangerous
+
+Hardcoding an interface name like `eth0` is a common mistake. Amarel compute nodes use unpredictable NIC names (`ens`, `enp3s0`, `bond0`, etc.) that differ between node pools. If NCCL can't find `eth0`, it falls back to loopback — all ranks appear to communicate but cross-node collectives produce `ncclInvalidUsage` or silently hang.
+
+**Observed failure (job 56728790):** 2-node job on `gpuk002` + `gpuk009` failed with `ncclInvalidUsage` on the first `dist.barrier()` because `eth0` did not exist on those nodes.
+
+Use the exclude-prefix syntax instead — it works regardless of the actual interface name:
+```bash
+export NCCL_SOCKET_IFNAME=^lo,^docker   # exclude loopback and docker; use whatever remains
+```
+
+If a multi-node job still hangs, find the real interface name with an interactive session:
+```bash
+srun --partition=gpu --nodes=1 --gres=gpu:1 --time=00:10:00 --pty bash -c "ip -o link show | awk -F': ' '{print \$2}'"
+```
+Then pin it explicitly, e.g. `NCCL_SOCKET_IFNAME=enp3s0`.
 
 ---
 

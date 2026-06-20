@@ -139,15 +139,20 @@ source "$SLURM_SUBMIT_DIR/slurm/common.sh"
 1. `seq=1024` means 4,096 prediction targets per batch. AdamW spends ~10 steps warming up its first and second moment estimates (`m`, `v`). With only 90 effective steps, there isn't enough time for a deep model to memorise thousands of targets.
 2. `lr=1e-3` is the right LR for *generalisation*, not for *memorisation*. The overfit test doesn't need to generalise — it just needs to prove gradients flow.
 
-**Fix:** Use a tiny batch that gives the model an absurd capacity advantage:
+**Second cause — dropout is active in `model.train()` mode:**
+With `dropout=0.1`, each forward pass randomly zeros 10% of activations, so the model sees a *different effective network* every step even on the same fixed batch. This prevents memorisation and causes loss to oscillate rather than converge. The fix is `model.eval()` inside the test — it disables dropout without affecting gradient computation.
+
+**Fix:** Use a tiny batch that gives the model an absurd capacity advantage, and disable dropout:
 ```python
-# BAD — 4,096 targets, lr for generalisation, too few steps
-x = torch.randint(0, vocab_size, (4, 1024))   # 4096 targets
+# BAD — large batch, train mode (dropout on), lr for generalisation
+model.train()                                  # dropout active — loss oscillates
+x = torch.randint(0, vocab_size, (4, 1024))   # 4096 targets — too many for 100 steps
 opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
 for step in range(100): ...
 
-# GOOD — 128 targets, aggressive lr, enough steps for AdamW warmup
-x = torch.randint(0, vocab_size, (4, 32))     # 128 targets
+# GOOD — tiny batch, eval mode (dropout off), aggressive lr
+model.eval()                                   # dropout disabled — deterministic
+x = torch.randint(0, vocab_size, (4, 32))     # 128 targets — model has 1M:1 capacity advantage
 opt = torch.optim.AdamW(model.parameters(), lr=1e-2)
 for step in range(150): ...
 ```

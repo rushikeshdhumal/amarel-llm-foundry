@@ -145,21 +145,29 @@ With `dropout=0.1`, each forward pass randomly zeros 10% of activations — the 
 **Third cause — `AdamW` default `weight_decay=0.01`:**
 `torch.optim.AdamW` applies L2 weight decay by default. For memorisation, this actively fights convergence by penalising large weights — it creates a loss floor the optimiser can't go below. Symptom: monotonically decreasing but stalling loss with diminishing step sizes (e.g. 4.97 → 3.88 → 3.11 → 2.70 → 2.49). Fix: `weight_decay=0.0` in the overfit test optimizer.
 
-**Fix:** Use a tiny batch, disable dropout (`eval()`), and disable weight decay:
+**Fourth cause — `lr` too low: Adam's step budget must cover the required logit increase:**
+To drive loss to near-zero, each correct token's logit must increase by roughly `log(vocab_size × 100) ≈ 15` units (enough for softmax to assign ~99% probability). Adam's effective logit movement per step ≈ `lr`. So the budget is `lr × steps`:
+```
+lr=0.01 × 150 steps = 1.5 logit units  → plateaus at loss ~3  (not enough)
+lr=0.10 × 150 steps = 15 logit units   → converges to <0.01   (just right)
+```
+Symptom: loss decreases monotonically but plateaus well above zero (e.g. 5.5 → 4.2 → 3.7 → 3.6 → 3.2) with diminishing per-step improvement. Fix: `lr=0.1` for the overfit test — 10× the training LR. Safe on a fixed batch because the gradient direction is consistent and there is no risk of generalisation-hurting overshoots.
+
+**Fix:** Use a tiny batch, eval mode, no weight decay, and a high memorisation LR:
 ```python
-# BAD — large batch, train mode (dropout on), weight decay on, lr for generalisation
+# BAD — large batch, train mode (dropout on), weight decay on, lr too low
 model.train()                                                    # dropout active — loss oscillates
 x = torch.randint(0, vocab_size, (4, 1024))                     # 4096 targets — too many
-opt = torch.optim.AdamW(model.parameters(), lr=1e-3)            # weight_decay=0.01 by default — stalls
+opt = torch.optim.AdamW(model.parameters(), lr=1e-3)            # weight_decay=0.01, lr budget 0.15 — stalls
 for step in range(100): ...
 
-# GOOD — tiny batch, eval mode, no weight decay, aggressive lr
+# GOOD — tiny batch, eval mode, no weight decay, sufficient lr budget
 model.eval()                                                     # dropout off — deterministic
 x = torch.randint(0, vocab_size, (4, 32))                       # 128 targets — 1M:1 capacity advantage
-opt = torch.optim.AdamW(model.parameters(), lr=1e-2, weight_decay=0.0)  # pure gradient descent
+opt = torch.optim.AdamW(model.parameters(), lr=0.1, weight_decay=0.0)  # budget: 0.1 × 150 = 15 ✓
 for step in range(150): ...
 ```
 
-With 124M parameters and only 128 targets (~1,000,000:1 ratio), the model must converge to near-zero. If it doesn't, the bug is real.
+With 124M parameters and only 128 targets (~1,000,000:1 ratio), and sufficient lr budget, the model must converge to near-zero. If it doesn't, the bug is real.
 
-**Rule of thumb:** Overfit test `seq_len` should be ~32–64 regardless of training `seq_len`. Keep the test fast and unambiguous.
+**Rule of thumb:** Overfit test `seq_len` should be ~32–64 regardless of training `seq_len`. `lr × steps ≥ 15` is the convergence budget for a GPT-2-scale vocab.

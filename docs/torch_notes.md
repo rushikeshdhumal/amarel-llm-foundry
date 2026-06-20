@@ -128,3 +128,30 @@ dist.init_process_group(
 ```bash
 source "$SLURM_SUBMIT_DIR/slurm/common.sh"
 ```
+
+---
+
+## 10. Overfit test batch size must match model capacity, not training config
+
+**What happened:** A single-batch overfit test on a 124M model with `bs=4, seq=1024` ran for 100 steps at `lr=1e-3` and only reached loss 5.26 — reporting failure even though the model was correct (full training later converged to 1.03).
+
+**Why:** Two compounding issues:
+1. `seq=1024` means 4,096 prediction targets per batch. AdamW spends ~10 steps warming up its first and second moment estimates (`m`, `v`). With only 90 effective steps, there isn't enough time for a deep model to memorise thousands of targets.
+2. `lr=1e-3` is the right LR for *generalisation*, not for *memorisation*. The overfit test doesn't need to generalise — it just needs to prove gradients flow.
+
+**Fix:** Use a tiny batch that gives the model an absurd capacity advantage:
+```python
+# BAD — 4,096 targets, lr for generalisation, too few steps
+x = torch.randint(0, vocab_size, (4, 1024))   # 4096 targets
+opt = torch.optim.AdamW(model.parameters(), lr=1e-3)
+for step in range(100): ...
+
+# GOOD — 128 targets, aggressive lr, enough steps for AdamW warmup
+x = torch.randint(0, vocab_size, (4, 32))     # 128 targets
+opt = torch.optim.AdamW(model.parameters(), lr=1e-2)
+for step in range(150): ...
+```
+
+With 124M parameters and only 128 targets (~1,000,000:1 ratio), the model must converge to near-zero. If it doesn't, the bug is real.
+
+**Rule of thumb:** Overfit test `seq_len` should be ~32–64 regardless of the training `seq_len`. Keep the test fast and unambiguous.

@@ -192,6 +192,13 @@ def run_overfit_test(model: GPT, device: torch.device) -> None:
 
     print(f"\n── Overfit test ({BATCH}×{SEQ} batch, {STEPS} steps, lr={LR}) ──")
 
+    # Disable dropout for this test.
+    # Dropout randomly zeros activations each forward pass. On a single fixed
+    # batch this creates a different effective network every step, making it
+    # impossible to memorise the batch reliably. eval() turns dropout off
+    # without affecting gradient computation — backprop still works normally.
+    model.eval()
+
     # Same seed every run → reproducible pass/fail result.
     torch.manual_seed(42)
     x = torch.randint(0, model.config.vocab_size, (BATCH, SEQ), device=device)

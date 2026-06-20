@@ -77,7 +77,48 @@ Halving `T` or `B` quarters the attention memory. This is why FlashAttention (Ph
 
 ---
 
-## 6. `dirname "$0"` is unreliable in SLURM batch jobs
+## 7. `torch.cuda.set_device()` must be called *before* `init_process_group()`
+
+**What happened:** A 2-node NCCL job failed immediately at the first `dist.barrier()` with `ncclInvalidUsage`. The `.err` file also warned: *"using GPU 0 to perform barrier as devices used by this process are currently unknown"*.
+
+**Why:** `init_process_group()` builds the NCCL communicator. NCCL needs to know which physical GPU each rank owns at communicator-creation time — it uses that information to set up peer-to-peer paths between devices. Calling `set_device()` after the group is already initialised means NCCL built the communicator without that information, resulting in `ncclInvalidUsage` on the very first collective.
+
+```python
+# WRONG — device is unknown when the communicator is created
+dist.init_process_group(backend="nccl")
+torch.cuda.set_device(local_rank)   # too late
+
+# CORRECT — pin the GPU first, then create the communicator
+torch.cuda.set_device(local_rank)
+dist.init_process_group(backend="nccl")
+```
+
+**Fix:** Always `set_device(local_rank)` before `init_process_group()`. Also pass `device_id` explicitly (see next entry).
+
+---
+
+## 8. Pass `device_id` to `init_process_group()` in PyTorch 2.x
+
+**What happened:** Even after fixing the ordering above, PyTorch still logged a warning that it was "guessing" the GPU for the barrier.
+
+**Why:** PyTorch 2.x added a `device_id` parameter to `init_process_group()` so the framework can definitively associate a rank with its GPU from the start. Without it, PyTorch guesses — usually correctly, but the ambiguity can cause subtle hangs on some topologies.
+
+```python
+# PyTorch 2.x — pass device_id to eliminate the guessing warning
+device = torch.device(f"cuda:{local_rank}")
+torch.cuda.set_device(device)
+dist.init_process_group(
+    backend="nccl",
+    init_method="env://",
+    device_id=device,   # ← explicit GPU binding
+)
+```
+
+**Fix:** Pass `device_id=torch.device(f"cuda:{local_rank}")` to `init_process_group()`. Requires PyTorch ≥ 2.0.
+
+---
+
+## 9. `dirname "$0"` is unreliable in SLURM batch jobs
 
 **What happened:** `source "$(dirname "$0")/common.sh"` silently failed, leaving `$SCRATCH` unset.
 

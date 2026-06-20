@@ -19,7 +19,8 @@ import torch.distributed as dist
 
 
 # ── NCCL safety: must be set BEFORE dist.init_process_group ──────────────────
-os.environ.setdefault("NCCL_ASYNC_ERROR_HANDLING", "1")
+# PyTorch 2.x renamed this variable; set both for backwards compatibility.
+os.environ.setdefault("TORCH_NCCL_ASYNC_ERROR_HANDLING", "1")
 
 
 def resolve_master_addr() -> str:
@@ -69,15 +70,31 @@ def main() -> None:
     if "MASTER_PORT" not in os.environ:
         os.environ["MASTER_PORT"] = "29500"
 
-    dist.init_process_group(backend=args.backend, init_method="env://")
+    local_rank: int = int(os.environ.get("LOCAL_RANK", 0))
+
+    # Pin this process to its GPU BEFORE init_process_group.
+    # NCCL requires the device assignment to be known at group creation time;
+    # setting it afterwards triggers "devices unknown" warnings and can cause
+    # ncclInvalidUsage on the first collective (barrier/all-reduce).
+    if args.backend == "nccl" and torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
+        device_id = torch.device(f"cuda:{local_rank}")
+    else:
+        device_id = None
+
+    # Pass device_id so PyTorch can associate each rank with its GPU at init
+    # time, eliminating the barrier "devices unknown" warning.
+    dist.init_process_group(
+        backend=args.backend,
+        init_method="env://",
+        device_id=device_id,
+    )
 
     rank: int = dist.get_rank()
     world_size: int = dist.get_world_size()
-    local_rank: int = int(os.environ.get("LOCAL_RANK", 0))
     hostname: str = socket.gethostname()
 
-    if args.backend == "nccl" and torch.cuda.is_available():
-        torch.cuda.set_device(local_rank)
+    if device_id is not None:
         device_name: str = torch.cuda.get_device_name(local_rank)
     else:
         device_name = "cpu"

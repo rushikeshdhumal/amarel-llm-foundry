@@ -1,13 +1,13 @@
-# Phase 1 — NanoGPT Transformer
+# Phase 2 — DDP Multi-GPU Training
 
-**Branch**: `feature/01-nanogpt-transformer`  
+**Branch**: `feature/02-ddp-multi-gpu`  
 **Project**: [Amarel LLM Foundry](https://github.com/rushikeshdhumal/amarel-llm-foundry) — 5-phase journey from SLURM hello-world to a multi-agent system.
 
 ---
 
 ## Goal
 
-Implement a GPT-2 124M decoder-only transformer from scratch in pure PyTorch and train it to convergence on the TinyStories dataset using a single GPU on the Amarel HPC cluster.
+Scale the Phase 1 GPT training to 4 GPUs on a single Amarel node using PyTorch `DistributedDataParallel` (DDP). Train a larger 350M-parameter model and verify that throughput scales close to 4×.
 
 ---
 
@@ -15,36 +15,66 @@ Implement a GPT-2 124M decoder-only transformer from scratch in pure PyTorch and
 
 | File | Purpose |
 | :--- | :--- |
-| `src/tokenizer.py` | tiktoken GPT-2 BPE wrapper (`VOCAB_SIZE=50257`, EOT token handling) |
-| `src/data_utils.py` | Streaming `IterableDataset` over TinyStories `.txt` — no full RAM load |
-| `src/model.py` | Full GPT: `CausalSelfAttention` → `MLP` → `TransformerBlock` → `GPT` (124.4M params) |
-| `src/train_single_gpu.py` | Training loop: AMP, cosine LR schedule, grad clipping, checkpointing, `--resume` |
-| `src/generate.py` | Inference script: load checkpoint, generate text with temperature + top-k sampling |
-| `configs/base_config.yaml` | Global defaults (`log_interval`, `save_interval`, `seq_len`, …) |
-| `configs/phase1_124M.yaml` | Phase overrides: `n_layer=12`, `n_head=12`, `n_embd=768`, `bs=16`, `lr=3e-4` |
-| `slurm/train_1gpu.sh` | Single-GPU SLURM job (16h wall clock, 48 GB RAM) |
-| `slurm/generate.sh` | Short inference job (15 min, 1 GPU); accepts `--checkpoint <path>` |
-| `docs/torch_notes.md` | PyTorch gotchas hit during development |
-| `docs/slurm-guide.md` | SLURM reference for Amarel |
+| `src/train_ddp.py` | DDP training loop: NCCL process group setup, `RankShardedDataset`, linear LR scaling, rank-0-only checkpointing |
+| `src/generate.py` | Inference script (carried from Phase 1 — checkpoints are compatible) |
+| `configs/phase2_350M.yaml` | Phase overrides: `n_layer=24`, `n_head=16`, `n_embd=1024` (354M params) |
+| `slurm/train_ddp_4gpu.sh` | Single-node 4-GPU SLURM job via `torchrun` |
+
+All model, data, and config utilities (`src/model.py`, `src/data_utils.py`, `src/train_single_gpu.py`) are shared from Phase 1 — no duplication.
 
 ---
 
-## Model architecture
+## Model architecture (350M)
 
 ```
-Token embedding  (50257 × 768)
-Position embedding (1024 × 768)
+Token embedding  (50257 × 1024)
+Position embedding (1024 × 1024)
         ↓
- × 12  TransformerBlock
+ × 24  TransformerBlock
         ├── LayerNorm
-        ├── CausalSelfAttention  (12 heads, head_dim=64, causal mask)
+        ├── CausalSelfAttention  (16 heads, head_dim=64, causal mask)
         ├── LayerNorm
-        └── MLP  (768 → 3072 → 768, GELU)
+        └── MLP  (1024 → 4096 → 1024, GELU)
         ↓
-LayerNorm → Linear (768 → 50257, weight-tied to token embedding)
+LayerNorm → Linear (1024 → 50257, weight-tied to token embedding)
 ```
 
-Total parameters: **124.4M**
+Total parameters: **354M** (~350M)
+
+---
+
+## How DDP training works
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      Single SLURM node                      │
+│                                                             │
+│  torchrun spawns 4 processes (one per GPU):                 │
+│                                                             │
+│  Rank 0 (GPU 0)   Rank 1 (GPU 1)   Rank 2 (GPU 2)   Rank 3 │
+│  ┌──────────┐     ┌──────────┐     ┌──────────┐     ┌─────┐│
+│  │  GPT 350M│     │  GPT 350M│     │  GPT 350M│     │ GPT ││
+│  │  copy 0  │     │  copy 1  │     │  copy 2  │     │copy3││
+│  └────┬─────┘     └────┬─────┘     └────┬─────┘     └──┬──┘│
+│       │ batch A        │ batch B        │ batch C       │D  │
+│       ↓                ↓                ↓               ↓   │
+│   forward+backward  forward+backward  forward+backward  f+b │
+│       │ grads          │ grads          │ grads         │   │
+│       └────────────────┴────────────────┴───────────────┘   │
+│                    NCCL all-reduce (avg grads)               │
+│       ┌────────────────┬────────────────┬───────────────┐   │
+│       ↓                ↓                ↓               ↓   │
+│   optimizer step    optimizer step   optimizer step   opt   │
+│   (identical on all 4 GPUs — replicas stay in sync)         │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Key design points:**
+- `RankShardedDataset`: each rank receives sequence `i` only when `i % world_size == rank`. Non-overlapping by construction; no `DistributedSampler` needed (IterableDataset).
+- Linear LR scaling: `effective_lr = base_lr × world_size = 3e-4 × 4 = 1.2e-3`.
+- `torch.compile` fires **before** `DDP()` wrap so TorchInductor sees the raw computation graph.
+- Checkpoints save `model.module.state_dict()` — strips the DDP `module.` prefix so checkpoints load into plain `GPT` (compatible with `generate.py`).
+- Only rank 0 writes; `dist.barrier()` after every save so no rank races ahead.
 
 ---
 
@@ -54,162 +84,73 @@ Total parameters: **124.4M**
 
 | Param | Value | Reason |
 | :--- | :--- | :--- |
-| `batch_size` | 16 | Attention is O(B×T²); bs=64 OOMs on 40 GB at seq=1024 |
+| `batch_size` | 8 per GPU | Effective 32 with 4 GPUs; fits 350M model on 40 GB A100 |
 | `seq_len` | 1024 | Full GPT-2 context window |
-| `learning_rate` | 3e-4 | AdamW with cosine decay to 0 |
+| `learning_rate` | 3e-4 (base) | Scaled to 1.2e-3 by `train_ddp.py` (linear scaling rule) |
 | `grad_clip` | 1.0 | `clip_grad_norm_` before every optimizer step |
-| `use_compile` | false | Cluster GCC 4.8.5 can't build TorchInductor (`stdatomic.h`) |
-| `use_amp` | true (auto) | Enabled whenever CUDA is available; not a config key — auto-detected from device |
-
-### Training log
-
-| Run | Steps | Best loss | Final loss | Notes |
-| :--- | :--- | :--- | :--- | :--- |
-| Run 1 | 0 → 27,500 | **1.2557** @ step 26,600 | 1.4173 | Killed by 4h wall-clock limit |
-| Run 2 | 27,500 → 100,000 | **1.0330** @ step 91,900 | 1.1480 | Completed full cosine schedule |
-
-### Checkpoint note
-
-The best loss (1.0330) occurred at step 91,900, which is **not** a multiple of `save_interval=500`.
-The nearest saved checkpoints are `step_0091500` and `step_0092000`; check their `config.yaml`
-for `_loss` and use the lower one.
-
-> **Fix for future runs:** `train_single_gpu.py` now maintains a single `best/` directory inside
-> the run folder that is overwritten whenever a new lowest loss is reached — regardless of
-> `save_interval`. Phase 2+ runs will always have an exact best checkpoint.
+| `warmup_steps` | 2000 | Linear ramp from 0 to effective_lr; matches Phase 1 for comparison |
+| `use_compile` | false | Amarel GCC 4.8.5 incompatible with TorchInductor |
+| `use_amp` | true (auto) | `torch.autocast(fp16)` + `GradScaler` on all ranks |
 
 ### Acceptance criteria
 
-- [x] Forward pass runs without shape errors (`bs=4, seq=1024`)
-- [x] Checkpoints saved with `model.pt`, `optimizer.pt`, `config.yaml`
-- [x] Training script accepts `--config` and `--resume` flags
-- [x] Full 100k-step run converges (best loss **1.0330**)
-- [x] Single-batch overfit test: loss drops to **0.0028** in 100 steps (proxy model)
-- [x] Gradient norms logged every `grad_norm_log_interval` steps (steady ~0.42 throughout run)
-- [x] Inference test: model produces coherent short story fragments — see samples below
-
-### Inference samples
-
-Checkpoint: `step_0093000` (loss 1.0527) · `temperature=0.8` · `top_k=40` · `max_new_tokens=150`
-
-**Prompt 1:** *Once upon a time there was a little girl named Lily*
-> Lily loved to play in her room with all the toys. One day she was playing with her doll when she
-> heard a strange noise. It was loud and scary. Lily asked her mom, "What is that noise?" Her mom
-> said, "It's the wind, Lily." … Lily was scared but she was brave. She went outside and saw the
-> wind blowing really hard. But she was careful and she was not scared. Lily and her mom played
-> until the wind stopped. `<|endoftext|>`
-
-**Prompt 2:** *One day, a small dog found a*
-> big, red ball. The dog wanted to play with the ball, but it was too big. … Then, a clever cat
-> came by and saw the dog. The cat had an idea. … The dog put the stick under the ball. Now, the
-> ball was easier to get! The dog and the cat played with the big, red ball all day. They were very
-> happy and became good friends.
-
-**Prompt 3:** *The sun was shining and*
-> birds were singing. The boy saw a big red ball near a tree. He wanted to play with it. … "Don't
-> worry, the tree is not broken. It can heal." They went to the tree and the boy's mommy put a
-> small stick under the tree's roots. The tree started to dance. The tree's roots healed …
-
-**Observations:**
-- All three stories are grammatically correct and stylistically appropriate for TinyStories.
-- The model learned narrative structure: setup → conflict → resolution.
-- Prompt 1 ended naturally with `<|endoftext|>` — the boundary token was learned.
-- No degenerate loops or random word soup at loss ~1.05.
+- [ ] Script launches via `torchrun --nproc_per_node=4` without errors
+- [ ] Overfit test passes on rank 0 (proxy model, loss < 0.01 in 100 steps)
+- [ ] Loss after 100 steps is within 1e-4 of Phase 1 single-GPU baseline
+- [ ] Training on 4 GPUs achieves ≥ 3× throughput over Phase 1 single-GPU (tok/s)
+- [ ] Checkpoints saved only from rank 0 (`model.module.state_dict()`, no `module.` prefix)
+- [ ] `generate.py` loads Phase 2 checkpoint and produces coherent text
 
 ---
 
 ## Running on Amarel
 
-### First-time cluster setup
+### Prerequisites (inherits from Phase 1)
 
 ```bash
-# On the login node
-module use /projects/community/modulefiles
-module load anaconda/2025.06-ts840
-conda create -n llm python=3.11 -y
+# Same conda env as Phase 1 — no new packages required
 conda activate llm
-conda install numpy -y
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
-pip install tiktoken omegaconf datasets
-```
-
-### Download TinyStories
-
-```bash
-mkdir -p /scratch/$USER/data/tinystories
-wget https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/TinyStoriesV2-GPT4-train.txt \
-     -P /scratch/$USER/data/tinystories/
 ```
 
 ### Submit a training job
 
 ```bash
 cd /scratch/$USER/amarel-llm-foundry
-git pull origin feature/01-nanogpt-transformer
-sbatch slurm/train_1gpu.sh
+git pull origin feature/02-ddp-multi-gpu
+sbatch slurm/train_ddp_4gpu.sh
 ```
+
+### Baseline comparison (DDP with 124M config)
+
+To verify DDP reproduces the single-GPU loss curve before committing to the full 350M run:
+
+```bash
+sbatch slurm/train_ddp_4gpu.sh --config configs/phase1_124M.yaml
+```
+
+Run 100 steps and compare loss to the Phase 1 log. Expect them to match within 1e-4 at each step (same architecture, same effective batch, linear-scaled LR).
 
 ### Resume from a checkpoint
 
 ```bash
-sbatch slurm/train_1gpu.sh --resume $CHECKPOINT_DIR/run_<timestamp>/step_<N>
+sbatch slurm/train_ddp_4gpu.sh --resume $CHECKPOINT_DIR/run_<timestamp>/step_<N>
+```
+
+### Monitor output
+
+```bash
+OUT=gpt_ddp_4gpu_<JOBID>.out
+tail -50 $OUT                                                           # did it start cleanly?
+grep "^step" $OUT | awk -F'|' '{print $2,$0}' | sort -n | head -5 | cut -d' ' -f3-  # best losses
+grep -i "error\|nccl\|timeout\|killed\|oom" $OUT gpt_ddp_4gpu_<JOBID>.err
 ```
 
 ### Copy best checkpoint to durable storage
 
-`$SCRATCH` is purged after 90 days and is not backed up.
-`/projects/$USER` requires a separate OARC allocation request, so the Phase 1
-checkpoint was saved to the home directory instead (backed up, 20 GB quota):
-
 ```bash
-mkdir -p ~/checkpoints/phase1_best
-cp -r $SCRATCH/checkpoints/run_<ts>/step_0093000 ~/checkpoints/phase1_best/
+# Phase 2+ runs produce a best/ directory automatically
+cp -r $CHECKPOINT_DIR/run_<ts>/best ~/checkpoints/phase2_best/
 ```
-
-**Saved:** `~/checkpoints/phase1_best/step_0093000` (loss 1.0527)
-
-> The true best loss (1.0330) occurred at step 91,900, which falls between two
-> `save_interval=500` boundaries and was never written to disk. `step_0093000`
-> is the next available checkpoint with a comparable loss (~0.02 difference).
-> Phase 2+ runs will also produce a `best/` directory inside the run folder
-> (overwritten whenever loss improves) so the exact best step is always captured.
-
-### Run inference on a checkpoint
-
-```bash
-# Submit as a batch job (waits in queue):
-sbatch slurm/generate.sh --checkpoint ~/checkpoints/phase1_best/step_0093000
-
-# Or run immediately in an interactive GPU session:
-srun --partition=gpu --gres=gpu:1 --mem=8G --time=00:10:00 --pty bash
-cd $SLURM_SUBMIT_DIR && source slurm/common.sh
-python -m src.generate \
-    --checkpoint ~/checkpoints/phase1_best/step_0093000 \
-    --max_new_tokens 150 --temperature 0.8 --top_k 40
-```
-
-**What to look for:** Each prompt should produce a grammatically plausible sentence or two
-in the style of a children's story — not random word soup. Exact coherence depends on
-how close the nearest checkpoint is to the true best loss.
-
-### Inspect training output without reading 100k lines
-
-```bash
-OUT=gpt_1gpu_<JOBID>.out
-tail -50 $OUT                                                          # did it finish?
-grep "^step" $OUT | awk -F'|' '{print $2,$0}' | sort -n | head -5 | cut -d' ' -f3-  # best losses
-grep -i "error\|warn\|killed\|oom" $OUT gpt_1gpu_<JOBID>.err          # problems
-```
-
-### Environment
-
-| Item | Value |
-| :--- | :--- |
-| Cluster | Amarel (OARC, Rutgers University) |
-| GPU | NVIDIA L40S / A100-PCIE-40GB (40 GB) |
-| CUDA | 12.8.1 |
-| PyTorch | 2.6.0+cu124 |
-| Python | 3.11 (conda env `llm`) |
 
 ---
 
@@ -218,34 +159,35 @@ grep -i "error\|warn\|killed\|oom" $OUT gpt_1gpu_<JOBID>.err          # problems
 ```
 amarel-llm-foundry/
 ├── configs/
-│   ├── base_config.yaml       # global defaults
-│   └── phase1_124M.yaml       # phase 1 overrides
+│   ├── base_config.yaml       # global defaults (shared)
+│   ├── phase1_124M.yaml       # Phase 1 overrides (shared for baseline check)
+│   └── phase2_350M.yaml       # Phase 2: 350M model
 ├── docs/
-│   ├── slurm-guide.md         # SLURM reference for Amarel
-│   └── torch_notes.md         # PyTorch gotchas
-├── instructions/              # Cursor agent blueprints
+│   ├── slurm-guide.md
+│   └── torch_notes.md
 ├── slurm/
-│   ├── common.sh              # shared env (CUDA, conda, NCCL)
-│   ├── train_1gpu.sh          # phase 1 training job
-│   ├── generate.sh            # inference job
-│   └── hello_*.sh             # phase 0 distributed smoke tests
+│   ├── common.sh
+│   ├── train_1gpu.sh          # Phase 1 (single GPU)
+│   ├── train_ddp_4gpu.sh      # Phase 2 (4-GPU DDP)
+│   ├── generate.sh
+│   └── hello_*.sh
 └── src/
     ├── tokenizer.py
-    ├── data_utils.py
-    ├── model.py
-    ├── train_single_gpu.py
-    └── generate.py
+    ├── data_utils.py          # shared
+    ├── model.py               # shared
+    ├── train_single_gpu.py    # Phase 1 (utility functions reused by train_ddp.py)
+    ├── train_ddp.py           # Phase 2
+    └── generate.py            # shared
 ```
 
 ---
 
-## Phase 0 — HPC Distributed Baseline ✅
+## Project map
 
-> Completed on branch `feature/00-hpc-distributed-baseline`.  
-> Validated `torch.distributed` + NCCL across Amarel GPU nodes.
-
-| Test | Result |
-| :--- | :--- |
-| `hello_1node_1gpu.sh` | ✅ `[Rank 0/1] Host: gpu030  device=NVIDIA L40S` |
-| `hello_1node_4gpu.sh` | ✅ Ranks 0–3 on `gpuk002` (A100-PCIE-40GB) |
-| `hello_2nodes_4gpu.sh` | ✅ Ranks 0–3 across `gpuk002`+`gpuk003` (A100-PCIE-40GB) — NCCL 2.21.5 |
+| Phase | Branch | Status | Goal |
+| :--- | :--- | :---: | :--- |
+| 0 | `feature/00-hpc-distributed-baseline` | ✅ | Validate `torch.distributed` + NCCL across Amarel nodes |
+| 1 | `feature/01-nanogpt-transformer` | ✅ | 124M GPT from scratch, single-GPU, loss 1.03 |
+| **2** | `feature/02-ddp-multi-gpu` | 🔄 | DDP scaling to 4 GPUs, 350M model |
+| 3 | `feature/03-fsdp-hpc-sharding` | ⬜ | FSDP multi-node sharding (1B params) |
+| 4 | `feature/04-agentic-system` | ⬜ | ReAct agents with trained checkpoint |

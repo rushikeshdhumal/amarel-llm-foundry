@@ -1,7 +1,7 @@
 # Phase 1 — NanoGPT Transformer
 
 **Branch**: `feature/01-nanogpt-transformer`  
-**Project**: [Amarel LLM Foundry](https://github.com/rd1113/amarel-llm-foundry) — 5-phase journey from SLURM hello-world to a multi-agent system.
+**Project**: [Amarel LLM Foundry](https://github.com/rushikeshdhumal/amarel-llm-foundry) — 5-phase journey from SLURM hello-world to a multi-agent system.
 
 ---
 

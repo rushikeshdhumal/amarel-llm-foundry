@@ -19,9 +19,11 @@ Implement a GPT-2 124M decoder-only transformer from scratch in pure PyTorch and
 | `src/data_utils.py` | Streaming `IterableDataset` over TinyStories `.txt` — no full RAM load |
 | `src/model.py` | Full GPT: `CausalSelfAttention` → `MLP` → `TransformerBlock` → `GPT` (124.4M params) |
 | `src/train_single_gpu.py` | Training loop: AMP, cosine LR schedule, grad clipping, checkpointing, `--resume` |
+| `src/generate.py` | Inference script: load checkpoint, generate text with temperature + top-k sampling |
 | `configs/base_config.yaml` | Global defaults (`log_interval`, `save_interval`, `seq_len`, …) |
 | `configs/phase1_124M.yaml` | Phase overrides: `n_layer=12`, `n_head=12`, `n_embd=768`, `bs=16`, `lr=3e-4` |
 | `slurm/train_1gpu.sh` | Single-GPU SLURM job (16h wall clock, 48 GB RAM) |
+| `slurm/generate.sh` | Short inference job (15 min, 1 GPU); accepts `--checkpoint <path>` |
 | `docs/torch_notes.md` | PyTorch gotchas hit during development |
 | `docs/slurm-guide.md` | SLURM reference for Amarel |
 
@@ -66,7 +68,15 @@ Total parameters: **124.4M**
 | Run 1 | 0 → 27,500 | **1.2557** @ step 26,600 | 1.4173 | Killed by 4h wall-clock limit |
 | Run 2 | 27,500 → 100,000 | **1.0330** @ step 91,900 | 1.1480 | Completed full cosine schedule |
 
-Best checkpoint: `step_0091900` — use this for Phase 2 (DDP).
+### Checkpoint note
+
+The best loss (1.0330) occurred at step 91,900, which is **not** a multiple of `save_interval=500`.
+The nearest saved checkpoints are `step_0091500` and `step_0092000`; check their `config.yaml`
+for `_loss` and use the lower one.
+
+> **Fix for future runs:** `train_single_gpu.py` now maintains a single `best/` directory inside
+> the run folder that is overwritten whenever a new lowest loss is reached — regardless of
+> `save_interval`. Phase 2+ runs will always have an exact best checkpoint.
 
 ### Acceptance criteria
 
@@ -76,6 +86,7 @@ Best checkpoint: `step_0091900` — use this for Phase 2 (DDP).
 - [x] Full 100k-step run converges (best loss **1.0330**)
 - [x] Single-batch overfit test: loss drops to **0.0028** in 100 steps (proxy model)
 - [x] Gradient norms logged every `grad_norm_log_interval` steps (steady ~0.42 throughout run)
+- [ ] Inference test: model produces coherent short story fragments (run `slurm/generate.sh`)
 
 ---
 
@@ -116,7 +127,43 @@ sbatch slurm/train_1gpu.sh
 sbatch slurm/train_1gpu.sh --resume $CHECKPOINT_DIR/run_<timestamp>/step_<N>
 ```
 
-### Inspect output without reading 100k lines
+### Copy best checkpoint to durable storage
+
+`$SCRATCH` is purged after 90 days and is not backed up.
+Copy the best checkpoint to `/projects/$USER/` before Phase 2:
+
+```bash
+# Identify which of the two nearest checkpoints has the lower loss:
+cat $SCRATCH/checkpoints/run_<ts>/step_0091500/config.yaml | grep _loss
+cat $SCRATCH/checkpoints/run_<ts>/step_0092000/config.yaml | grep _loss
+
+# Copy the winner (adjust step number):
+mkdir -p /projects/$USER/checkpoints/phase1_best
+cp -r $SCRATCH/checkpoints/run_<ts>/step_0091500 /projects/$USER/checkpoints/phase1_best/
+```
+
+Phase 2+ runs will also produce a `best/` directory inside the run folder
+(automatically overwritten whenever loss improves), making this step straightforward.
+
+### Run inference on a checkpoint
+
+```bash
+# Submit as a batch job (waits in queue):
+sbatch slurm/generate.sh --checkpoint /projects/$USER/checkpoints/phase1_best/step_0091500
+
+# Or run immediately in an interactive GPU session:
+srun --partition=gpu --gres=gpu:1 --mem=8G --time=00:10:00 --pty bash
+cd $SLURM_SUBMIT_DIR && source slurm/common.sh
+python -m src.generate \
+    --checkpoint /projects/$USER/checkpoints/phase1_best/step_0091500 \
+    --max_new_tokens 150 --temperature 0.8 --top_k 40
+```
+
+**What to look for:** Each prompt should produce a grammatically plausible sentence or two
+in the style of a children's story — not random word soup. Exact coherence depends on
+how close the nearest checkpoint is to the true best loss.
+
+### Inspect training output without reading 100k lines
 
 ```bash
 OUT=gpt_1gpu_<JOBID>.out
@@ -151,12 +198,14 @@ amarel-llm-foundry/
 ├── slurm/
 │   ├── common.sh              # shared env (CUDA, conda, NCCL)
 │   ├── train_1gpu.sh          # phase 1 training job
+│   ├── generate.sh            # inference job
 │   └── hello_*.sh             # phase 0 distributed smoke tests
 └── src/
     ├── tokenizer.py
     ├── data_utils.py
     ├── model.py
-    └── train_single_gpu.py
+    ├── train_single_gpu.py
+    └── generate.py
 ```
 
 ---

@@ -2,8 +2,8 @@
 #SBATCH --job-name=hello_2n4g
 #SBATCH --partition=gpu
 #SBATCH --nodes=2
-#SBATCH --ntasks-per-node=2
-#SBATCH --cpus-per-task=4
+#SBATCH --ntasks-per-node=1   # ONE torchrun launcher per node; torchrun spawns nproc_per_node workers internally
+#SBATCH --cpus-per-task=8     # 8 CPUs for the single task: enough for 2 GPU workers + headroom
 #SBATCH --gres=gpu:2
 #SBATCH --mem=32G
 #SBATCH --time=00:15:00
@@ -32,7 +32,11 @@ echo "SLURM_NODELIST=${SLURM_NODELIST}"
 echo "SLURM_NNODES=${SLURM_NNODES}  SLURM_NTASKS=${SLURM_NTASKS}"
 
 # ── Launch via srun so each node gets its own torchrun process ────────────────
-# torchrun --node_rank is derived from SLURM_PROCID injected by srun.
+# srun with --ntasks-per-node=1 runs this command ONCE per node.
+# SLURM_PROCID is 0 on the first node and 1 on the second → correct --node_rank.
+# torchrun then spawns --nproc_per_node=2 worker processes within each node.
+# DO NOT use --ntasks-per-node > 1: that would launch multiple torchrun
+# processes on the same node and cause EADDRINUSE on the rendezvous port.
 srun --label torchrun \
   --nnodes="${SLURM_NNODES}" \
   --nproc_per_node=2 \

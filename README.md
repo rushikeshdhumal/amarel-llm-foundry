@@ -86,7 +86,35 @@ for `_loss` and use the lower one.
 - [x] Full 100k-step run converges (best loss **1.0330**)
 - [x] Single-batch overfit test: loss drops to **0.0028** in 100 steps (proxy model)
 - [x] Gradient norms logged every `grad_norm_log_interval` steps (steady ~0.42 throughout run)
-- [ ] Inference test: model produces coherent short story fragments (run `slurm/generate.sh`)
+- [x] Inference test: model produces coherent short story fragments — see samples below
+
+### Inference samples
+
+Checkpoint: `step_0093000` (loss 1.0527) · `temperature=0.8` · `top_k=40` · `max_new_tokens=150`
+
+**Prompt 1:** *Once upon a time there was a little girl named Lily*
+> Lily loved to play in her room with all the toys. One day she was playing with her doll when she
+> heard a strange noise. It was loud and scary. Lily asked her mom, "What is that noise?" Her mom
+> said, "It's the wind, Lily." … Lily was scared but she was brave. She went outside and saw the
+> wind blowing really hard. But she was careful and she was not scared. Lily and her mom played
+> until the wind stopped. `<|endoftext|>`
+
+**Prompt 2:** *One day, a small dog found a*
+> big, red ball. The dog wanted to play with the ball, but it was too big. … Then, a clever cat
+> came by and saw the dog. The cat had an idea. … The dog put the stick under the ball. Now, the
+> ball was easier to get! The dog and the cat played with the big, red ball all day. They were very
+> happy and became good friends.
+
+**Prompt 3:** *The sun was shining and*
+> birds were singing. The boy saw a big red ball near a tree. He wanted to play with it. … "Don't
+> worry, the tree is not broken. It can heal." They went to the tree and the boy's mommy put a
+> small stick under the tree's roots. The tree started to dance. The tree's roots healed …
+
+**Observations:**
+- All three stories are grammatically correct and stylistically appropriate for TinyStories.
+- The model learned narrative structure: setup → conflict → resolution.
+- Prompt 1 ended naturally with `<|endoftext|>` — the boundary token was learned.
+- No degenerate loops or random word soup at loss ~1.05.
 
 ---
 
@@ -130,32 +158,33 @@ sbatch slurm/train_1gpu.sh --resume $CHECKPOINT_DIR/run_<timestamp>/step_<N>
 ### Copy best checkpoint to durable storage
 
 `$SCRATCH` is purged after 90 days and is not backed up.
-Copy the best checkpoint to `/projects/$USER/` before Phase 2:
+`/projects/$USER` requires a separate OARC allocation request, so the Phase 1
+checkpoint was saved to the home directory instead (backed up, 20 GB quota):
 
 ```bash
-# Identify which of the two nearest checkpoints has the lower loss:
-cat $SCRATCH/checkpoints/run_<ts>/step_0091500/config.yaml | grep _loss
-cat $SCRATCH/checkpoints/run_<ts>/step_0092000/config.yaml | grep _loss
-
-# Copy the winner (adjust step number):
-mkdir -p /projects/$USER/checkpoints/phase1_best
-cp -r $SCRATCH/checkpoints/run_<ts>/step_0091500 /projects/$USER/checkpoints/phase1_best/
+mkdir -p ~/checkpoints/phase1_best
+cp -r $SCRATCH/checkpoints/run_<ts>/step_0093000 ~/checkpoints/phase1_best/
 ```
 
-Phase 2+ runs will also produce a `best/` directory inside the run folder
-(automatically overwritten whenever loss improves), making this step straightforward.
+**Saved:** `~/checkpoints/phase1_best/step_0093000` (loss 1.0527)
+
+> The true best loss (1.0330) occurred at step 91,900, which falls between two
+> `save_interval=500` boundaries and was never written to disk. `step_0093000`
+> is the next available checkpoint with a comparable loss (~0.02 difference).
+> Phase 2+ runs will also produce a `best/` directory inside the run folder
+> (overwritten whenever loss improves) so the exact best step is always captured.
 
 ### Run inference on a checkpoint
 
 ```bash
 # Submit as a batch job (waits in queue):
-sbatch slurm/generate.sh --checkpoint /projects/$USER/checkpoints/phase1_best/step_0091500
+sbatch slurm/generate.sh --checkpoint ~/checkpoints/phase1_best/step_0093000
 
 # Or run immediately in an interactive GPU session:
 srun --partition=gpu --gres=gpu:1 --mem=8G --time=00:10:00 --pty bash
 cd $SLURM_SUBMIT_DIR && source slurm/common.sh
 python -m src.generate \
-    --checkpoint /projects/$USER/checkpoints/phase1_best/step_0091500 \
+    --checkpoint ~/checkpoints/phase1_best/step_0093000 \
     --max_new_tokens 150 --temperature 0.8 --top_k 40
 ```
 

@@ -248,4 +248,4 @@ amarel-llm-foundry/
 | :--- | :--- |
 | `hello_1node_1gpu.sh` | ✅ `[Rank 0/1] Host: gpu030  device=NVIDIA L40S` |
 | `hello_1node_4gpu.sh` | ✅ Ranks 0–3 on `gpuk002` (A100-PCIE-40GB) |
-| `hello_2nodes_4gpu.sh` | 🔄 Resubmitted after NCCL interface fix (`^lo,^docker`) |
+| `hello_2nodes_4gpu.sh` | ✅ Ranks 0–3 across `gpuk002`+`gpuk003` (A100-PCIE-40GB) — NCCL 2.21.5 |

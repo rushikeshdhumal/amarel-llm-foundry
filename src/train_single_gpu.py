@@ -355,6 +355,13 @@ def train(cfg: DictConfig, resume_dir: Path | None = None) -> None:
     step = start_step
     t0 = time.time()
 
+    # Track the best (lowest) loss seen so far so we can write a single
+    # "best/" checkpoint directory that is overwritten each time we improve.
+    # This is separate from the periodic save_interval checkpoints and costs
+    # only one extra checkpoint slot on disk, regardless of training length.
+    best_loss = float("inf")
+    best_ckpt_dir = run_dir / "best"
+
     print(f"\n── Training (steps {start_step} → {cfg.max_steps}) ──")
 
     while step < cfg.max_steps:
@@ -415,6 +422,18 @@ def train(cfg: DictConfig, resume_dir: Path | None = None) -> None:
         # ── Checkpointing ─────────────────────────────────────────────────────
         if step % cfg.save_interval == 0:
             save_checkpoint(model, optimizer, step, loss.item(), cfg, run_dir / f"step_{step:07d}")
+
+        # ── Save-best checkpoint ───────────────────────────────────────────────
+        # Overwrite the single "best/" directory whenever we see a new low loss.
+        # This guarantees the best weights are always on disk even if the best
+        # step falls between two periodic save_interval boundaries.
+        # shutil.rmtree clears the old "best/" atomically before re-saving.
+        current_loss = loss.item()
+        if current_loss < best_loss:
+            best_loss = current_loss
+            if best_ckpt_dir.exists():
+                shutil.rmtree(best_ckpt_dir)
+            save_checkpoint(model, optimizer, step, current_loss, cfg, best_ckpt_dir)
 
     # Save final checkpoint.
     save_checkpoint(model, optimizer, step, loss.item(), cfg, run_dir / f"step_{step:07d}_final")

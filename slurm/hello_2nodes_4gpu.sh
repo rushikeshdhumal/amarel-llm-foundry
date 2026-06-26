@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=hello_2n4g
-#SBATCH --partition=gpu
+#SBATCH --partition=gpu-redhat
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=1   # ONE torchrun launcher per node; torchrun spawns nproc_per_node workers internally
 #SBATCH --cpus-per-task=8     # 8 CPUs for the single task: enough for 2 GPU workers + headroom

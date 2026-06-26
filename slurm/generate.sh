@@ -5,7 +5,7 @@
 #   sbatch slurm/generate.sh --checkpoint $SCRATCH/checkpoints/run_<ts>/step_0091500
 #
 # Or interactively (no sbatch queue wait):
-#   srun --partition=gpu --gres=gpu:1 --mem=8G --time=00:10:00 --pty bash
+#   srun --partition=gpu-redhat --gres=gpu:1 --mem=8G --time=00:10:00 --pty bash
 #   cd $SLURM_SUBMIT_DIR && source slurm/common.sh
 #   python -m src.generate --checkpoint $SCRATCH/checkpoints/run_<ts>/step_0091500
 #
@@ -16,7 +16,7 @@
 #   --top_k 40                                       # restrict to top-40 tokens
 
 #SBATCH --job-name=gpt_generate
-#SBATCH --partition=gpu
+#SBATCH --partition=gpu-redhat
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=2       # inference is single-threaded; 2 CPUs is plenty

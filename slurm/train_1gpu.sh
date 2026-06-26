@@ -5,7 +5,7 @@
 # Resume:                sbatch slurm/train_1gpu.sh --resume checkpoints/run_<ts>/step_<N>
 
 #SBATCH --job-name=gpt_1gpu
-#SBATCH --partition=gpu
+#SBATCH --partition=gpu-redhat
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=4       # 4 CPUs: 2 for DataLoader workers + 2 headroom

@@ -24,7 +24,7 @@
 # No manual NCCL rendezvous configuration is needed.
 
 #SBATCH --job-name=gpt_ddp_4gpu
-#SBATCH --partition=gpu
+#SBATCH --partition=gpu-redhat
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1        # ONE torchrun launcher; it spawns 4 workers internally
 #SBATCH --cpus-per-task=8          # 2 CPUs per GPU × 4 GPUs = 8; for DataLoader workers

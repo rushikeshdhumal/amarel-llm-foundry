@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=hello_1n4g
-#SBATCH --partition=gpu
+#SBATCH --partition=gpu-redhat
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=4
 #SBATCH --cpus-per-task=4

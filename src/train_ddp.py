@@ -248,6 +248,102 @@ def build_ddp_dataloader(
     )
 
 
+# ── GPU memory-aware batch size ────────────────────────────────────────────────
+
+def auto_batch_size(
+    requested: int,
+    model: GPT,
+    device: torch.device,
+    world_size: int,
+) -> int:
+    """
+    Cap the configured per-GPU batch size to what safely fits in GPU memory,
+    then take the minimum across all DDP ranks (handles mixed-GPU nodes).
+
+    MEMORY MODEL
+    ────────────
+    GPU memory is consumed by four categories:
+
+      1. Static tensors (persist for the whole run, fp32):
+           weights    = n_params × 4 bytes
+           gradients  = n_params × 4 bytes
+           AdamW m    = n_params × 4 bytes   (first moment)
+           AdamW v    = n_params × 4 bytes   (second moment)
+           subtotal   = n_params × 16 bytes
+
+      2. Per-sample activations (fp16, stored for backward pass):
+           Attention scores: n_head × seq_len × seq_len × 2 bytes per layer
+           MLP hidden states: 4 × n_embd × seq_len × 2 bytes per layer
+           Residuals + LayerNorm: ~n_embd × seq_len × 2 bytes × 2 per layer
+           subtotal per sample ≈ n_layer × (n_head × seq² + 6 × n_embd × seq) × 2
+
+      3. NCCL / DDP all-reduce buffers: ~model_size / 4 (bucketed comms)
+
+      4. CUDA context + PyTorch allocator overhead: ~500 MB fixed
+
+    A 25% safety margin is applied on top to account for temporary
+    intermediate tensors (e.g. softmax, matmul scratch) and memory
+    fragmentation that is not captured by the static estimates above.
+
+    Args:
+        requested:   Batch size from the config (treated as an upper bound).
+        model:       Built GPT model (used to count parameters and read config).
+        device:      This rank's CUDA device.
+        world_size:  Number of DDP ranks (used for all-reduce of the result).
+
+    Returns:
+        Safe per-GPU batch size, identical on all ranks.
+    """
+    props = torch.cuda.get_device_properties(device)
+    total_bytes = props.total_memory
+    total_gb = total_bytes / 1024 ** 3
+
+    # ── Static memory ──────────────────────────────────────────────────────────
+    n_params = model.count_parameters()
+    static_bytes = n_params * 16  # weights + grads + AdamW m + v (all fp32)
+
+    # ── NCCL buffer estimate (DDP buckets are ~25 MB each, ~model_size/4 total)
+    nccl_bytes = n_params * 4 // 4  # rough: one extra fp32 copy of params / 4
+
+    # ── CUDA context overhead ──────────────────────────────────────────────────
+    overhead_bytes = 500 * 1024 ** 2  # 500 MB fixed
+
+    # ── Per-sample activation memory (fp16) ───────────────────────────────────
+    cfg = model.config
+    # Attention scores stored per layer per head: n_head × seq × seq fp16 values.
+    attn_bytes = cfg.n_head * cfg.seq_len * cfg.seq_len * 2
+    # MLP hidden layer (4× expansion) + input and output residuals per layer.
+    mlp_bytes = (4 * cfg.n_embd + 2 * cfg.n_embd) * cfg.seq_len * 2
+    act_per_sample = cfg.n_layer * (attn_bytes + mlp_bytes)
+
+    # ── Available memory after static allocations, with 25% safety margin ─────
+    usable_bytes = (total_bytes - static_bytes - nccl_bytes - overhead_bytes) * 0.75
+    usable_bytes = max(usable_bytes, 0)
+
+    computed_max = max(1, int(usable_bytes / act_per_sample))
+    local_safe = min(requested, computed_max)
+
+    # ── Synchronise across ranks: use the most constrained GPU ────────────────
+    # In mixed-GPU nodes (unlikely but possible), one rank might have less
+    # memory. All ranks must use the same batch size (DDP requires equal steps).
+    local_t = torch.tensor(local_safe, dtype=torch.int32, device=device)
+    dist.all_reduce(local_t, op=dist.ReduceOp.MIN)
+    global_safe = int(local_t.item())
+
+    # ── Log the decision (always, so every rank's GPU is visible in the log) ──
+    print(
+        f"[rank {dist.get_rank()}] GPU: {props.name}  "
+        f"VRAM: {total_gb:.1f} GB  "
+        f"static: {static_bytes/1024**3:.1f} GB  "
+        f"act/sample: {act_per_sample/1024**2:.0f} MB  "
+        f"computed_max_bs: {computed_max}  "
+        f"config_bs: {requested}  "
+        f"→ using bs={global_safe}"
+    )
+
+    return global_safe
+
+
 # ── Main training function ─────────────────────────────────────────────────────
 
 def train(
@@ -322,6 +418,21 @@ def train(
     # Only set find_unused_parameters=True if your model has conditional
     # branches that leave some parameters unused in certain forward passes.
     model = DDP(model, device_ids=[local_rank], find_unused_parameters=False)
+
+    # ── Auto batch size ───────────────────────────────────────────────────────
+    # Estimate the safe per-GPU batch size from available GPU memory and cap
+    # the config value if needed. Must run after the model is moved to GPU
+    # (static memory is already allocated) but before the DataLoader is built.
+    # Uses model.module (the raw GPT before DDP) to read n_params and config.
+    # All ranks participate so the result is globally consistent via all_reduce.
+    safe_bs = auto_batch_size(cfg.batch_size, model.module, device, world_size)
+    if safe_bs != cfg.batch_size:
+        if is_master:
+            print(
+                f"[auto_batch_size] Reduced batch_size {cfg.batch_size} → {safe_bs} "
+                f"to fit GPU memory."
+            )
+        cfg = OmegaConf.merge(cfg, {"batch_size": safe_bs})
 
     # ── Optimizer with linear LR scaling ──────────────────────────────────────
     # cfg.learning_rate is the base (single-GPU) learning rate from the config.

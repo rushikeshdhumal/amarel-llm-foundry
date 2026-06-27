@@ -68,7 +68,9 @@ from src.data_utils import build_dataloader
 
 
 # ── NCCL safety (required by GLOBAL.md even for single-GPU) ───────────────────
-os.environ.setdefault("NCCL_ASYNC_ERROR_HANDLING", "1")
+# PyTorch 2.x renamed NCCL_ASYNC_ERROR_HANDLING → TORCH_NCCL_ASYNC_ERROR_HANDLING.
+# The old name is silently ignored in PyTorch 2.x and emits a deprecation warning.
+os.environ.setdefault("TORCH_NCCL_ASYNC_ERROR_HANDLING", "1")
 
 
 # ── Learning rate schedule ─────────────────────────────────────────────────────

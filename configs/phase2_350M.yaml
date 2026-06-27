@@ -17,14 +17,17 @@ n_embd: 1024
 dropout: 0.1
 
 # ── Training ──────────────────────────────────────────────────────────────────
-# batch_size is PER GPU. With 4 GPUs: effective batch = 8 × 4 = 32 sequences/step.
-# Memory budget on A100-40GB (per rank):
+# batch_size is PER GPU. With 4 GPUs: effective batch = 4 × 4 = 16 sequences/step.
+# Memory budget per rank (conservative — covers both A100-40GB and 24GB nodes):
 #   Weights (fp32):   354M × 4B ≈ 1.4 GB
 #   Gradients (fp32): same     ≈ 1.4 GB
 #   AdamW state (m+v): 2×1.4   ≈ 2.8 GB
-#   Activations (fp16, bs=8, seq=1024, 24L): ~4 GB (estimated)
-#   Total: ~10 GB  →  well within 40 GB.
-batch_size: 8
+#   Activations (fp16, bs=4, seq=1024, 24L): ~5 GB (attention: 4×16×1024²×2×24 ≈ 3 GB)
+#   NCCL DDP buffers:           ≈ 0.5 GB
+#   Total: ~11 GB  →  fits on 24 GB GPUs with headroom.
+# NOTE: bs=8 (effective 32) OOM'd on 24 GB nodes. bs=4 (effective 16) matches
+# Phase 1's effective batch exactly, keeping LR scaling consistent.
+batch_size: 4
 
 # base learning rate (before linear scaling in train_ddp.py).
 # train_ddp.py applies: effective_lr = learning_rate × world_size

@@ -84,7 +84,7 @@ Total parameters: **354M** (~350M)
 
 | Param | Value | Reason |
 | :--- | :--- | :--- |
-| `batch_size` | 8 per GPU | Effective 32 with 4 GPUs; fits 350M model on 40 GB A100 |
+| `batch_size` | 4 per GPU (config ceiling) | `auto_batch_size()` caps this at runtime based on actual GPU VRAM; see `torch_notes.md` §10 |
 | `seq_len` | 1024 | Full GPT-2 context window |
 | `learning_rate` | 3e-4 (base) | Scaled to 1.2e-3 by `train_ddp.py` (linear scaling rule) |
 | `grad_clip` | 1.0 | `clip_grad_norm_` before every optimizer step |
@@ -97,7 +97,7 @@ Total parameters: **354M** (~350M)
 Ran `train_ddp_4gpu.sh --config configs/phase1_124M.yaml` first to validate DDP
 correctness before committing to the full 350M run.
 
-| Metric | Phase 1 (1 GPU, bs=16) | Phase 2 baseline (4 GPU, bs=16/GPU) | Notes |
+| Metric | Phase 1 (1 GPU, bs=16) | Phase 2 baseline (4 GPU, bs=16/GPU, 124M) | Notes |
 | :--- | :--- | :--- | :--- |
 | Best loss | 1.0330 @ step 91,900 | **0.8216** @ step 99,400 | Better: effective bs=64, scaled LR |
 | Throughput | ~46,274 tok/s | ~165,074 tok/s | Combined across 4 GPUs |

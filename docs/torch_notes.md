@@ -1,4 +1,4 @@
-# PyTorch Gotchas — Lessons from Phase 01
+# PyTorch Gotchas — Lessons from Phases 01 & 02
 
 Practical issues hit during development, explained from first principles.
 
@@ -164,3 +164,70 @@ for step in range(100): ...
 ```
 
 **Rule of thumb:** Never use the full production model for an overfit sanity check. Use the smallest model that exercises the same code paths.
+
+---
+
+## 10. Hard-coded batch sizes OOM when the GPU tier changes
+
+**What happened:** `batch_size: 8` in `phase2_350M.yaml` was set for an A100-40GB node. The DDP job landed on 24 GB GPU nodes instead and crashed immediately with `torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 512.00 MiB`.
+
+**Why:** GPU memory is split between four categories:
+
+```
+Total GPU memory
+  ├── Static tensors (persist whole run, fp32)
+  │     weights      = n_params × 4 B
+  │     gradients    = n_params × 4 B
+  │     AdamW m + v  = n_params × 8 B
+  │     subtotal     = n_params × 16 B   ← for 350M model: ~5.5 GB
+  │
+  ├── Per-sample activations (fp16, kept for backward pass)
+  │     attention scores: n_layer × n_head × seq² × 2 B per sample
+  │     MLP hidden:       n_layer × 4 × n_embd × seq × 2 B per sample
+  │     subtotal for 350M, seq=1024, bs=1: ~520 MB  → bs=8: ~4.2 GB
+  │
+  ├── NCCL / DDP all-reduce buffers   ≈ model_size / 4 (~350 MB)
+  │
+  └── CUDA context + allocator overhead  ≈ 500 MB fixed
+```
+
+At `bs=8` the total was ~11 GB — fine for an A100-40GB, but the job landed on
+nodes with only 23.57 GB of which ~12 GB was already consumed by static tensors
++ NCCL + overhead before the first forward pass.
+
+**Why the config alone can't solve this:** HPC schedulers allocate node types
+non-deterministically. The same `sbatch` command may land on A100-40GB nodes
+today and 24 GB nodes tomorrow, depending on queue pressure.
+
+**Fix — runtime memory check in `train_ddp.py`:**
+
+```python
+def auto_batch_size(requested, model, device, world_size):
+    total_bytes  = torch.cuda.get_device_properties(device).total_memory
+    static_bytes = model.count_parameters() * 16          # 4 fp32 copies
+    nccl_bytes   = model.count_parameters() * 4 // 4      # DDP bucket estimate
+    overhead     = 500 * 1024**2
+
+    act_per_sample = model.config.n_layer * (
+        model.config.n_head * model.config.seq_len**2 * 2 +   # attention
+        6 * model.config.n_embd * model.config.seq_len * 2    # MLP + residuals
+    )
+
+    usable = (total_bytes - static_bytes - nccl_bytes - overhead) * 0.75
+    computed_max = max(1, int(usable / act_per_sample))
+    local_safe   = min(requested, computed_max)
+
+    # All DDP ranks must agree — use the minimum across all GPUs
+    t = torch.tensor(local_safe, device=device)
+    dist.all_reduce(t, op=dist.ReduceOp.MIN)
+    return int(t.item())
+```
+
+The 0.75 safety factor covers temporary scratch tensors (softmax, matmul intermediates)
+and PyTorch allocator fragmentation that the static estimate doesn't capture.
+The `all_reduce(MIN)` ensures all DDP ranks use the same batch size — if even one
+rank has less memory, all ranks drop to its safe limit (required because every rank
+must call all-reduce the same number of times or NCCL will hang).
+
+**Rule of thumb:** Always derive batch size from the GPU's actual memory at runtime.
+Treat the config value as a ceiling, not a target.

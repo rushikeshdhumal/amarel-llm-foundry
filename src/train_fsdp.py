@@ -90,6 +90,7 @@ from pathlib import Path
 from typing import Iterator
 
 import torch
+import torch._dynamo
 import torch.distributed as dist
 import torch.distributed.checkpoint as dcp
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
@@ -420,7 +421,6 @@ def train(
             if is_master:
                 print(f"Compiling TransformerBlocks (sm_{cap[0]}{cap[1]})...")
             try:
-                import torch._dynamo
                 torch._dynamo.config.suppress_errors = True
                 for i, block in enumerate(model.blocks):
                     model.blocks[i] = torch.compile(block)

@@ -60,6 +60,7 @@ rank races ahead before the checkpoint is fully flushed to disk.
 """
 
 import argparse
+import gc
 import os
 import shutil
 import time
@@ -660,6 +661,16 @@ def main() -> None:
     try:
         train(cfg, rank, local_rank, world_size, resume_dir)
     finally:
+        # Force Python's cyclic garbage collector to collect the DDP model and
+        # all other distributed objects NOW, before we call destroy_process_group().
+        #
+        # WHY: DDP wraps the model in a C++ ProcessGroupNCCL reference. If Python
+        # GC hasn't collected those objects yet, their C++ destructors fire after
+        # destroy_process_group() returns — which triggers PyTorch's spurious
+        # "destroy_process_group() was not called before program exit" warning.
+        # gc.collect() is synchronous and deterministic, so the destructors run
+        # in the right order: Python objects → then NCCL teardown.
+        gc.collect()
         # Always destroy the process group, even if training raises an exception.
         # Leaving a stale process group causes the other ranks to hang forever.
         cleanup_distributed()

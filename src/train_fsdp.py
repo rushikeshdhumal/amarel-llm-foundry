@@ -84,6 +84,7 @@ import gc
 import os
 import shutil
 import time
+import types
 from datetime import datetime
 from functools import partial
 from pathlib import Path
@@ -103,14 +104,16 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 )
 from torch.utils.data import DataLoader, IterableDataset
 from omegaconf import OmegaConf, DictConfig
+import yaml
 
 from src.model import GPT, GPTConfig, TransformerBlock
 from src.data_utils import TinyStoriesDataset
 
-# Reuse all pure-utility functions from the single-GPU trainer.
+# Reuse pure-utility functions from the single-GPU trainer.
+# Note: load_checkpoint is intentionally NOT imported — FSDP uses
+# load_fsdp_checkpoint (DCP-based) instead of the single-GPU loader.
 from src.train_single_gpu import (
     get_lr,
-    load_checkpoint,
     run_overfit_test,
     build_optimizer,
 )
@@ -330,7 +333,6 @@ def save_fsdp_checkpoint(
 
     # Rank 0 writes human-readable metadata alongside the shard files.
     if dist.get_rank() == 0:
-        import yaml
         meta = {
             "step": step,
             "loss": float(loss),
@@ -354,7 +356,6 @@ def load_fsdp_checkpoint(
     dcp.load(state, checkpoint_id=str(ckpt_dir))
 
     # Read step from metadata written by rank 0 during save.
-    import yaml
     meta_path = ckpt_dir / "meta.yaml"
     if meta_path.exists():
         with open(meta_path) as f:
@@ -539,9 +540,12 @@ def train(
     # ── Overfit test (rank 0 only) ─────────────────────────────────────────────
     # Tests that the GPT code paths work (forward, backward, optimizer) using a
     # tiny proxy model. Does not touch the FSDP-wrapped 1.3B model.
+    # run_overfit_test only reads model.config.vocab_size to build a nano proxy;
+    # we pass a lightweight namespace rather than the FSDP wrapper to avoid
+    # relying on FSDP's undocumented __getattr__ delegation.
     if start_step == 0:
         if is_master:
-            run_overfit_test(model, device)
+            run_overfit_test(types.SimpleNamespace(config=model_cfg), device)
         dist.barrier()
 
     # ── Data ──────────────────────────────────────────────────────────────────
@@ -560,14 +564,13 @@ def train(
     )
 
     # ── Checkpoint paths (all ranks need them for DCP) ────────────────────────
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    # Broadcast timestamp from rank 0 so all ranks use the same directory name.
-    ts_tensor = torch.zeros(14, dtype=torch.uint8, device=device)
+    # Broadcast a Unix timestamp integer from rank 0 so all ranks format the
+    # same directory name. Avoids char-by-char encoding and is length-agnostic.
+    ts_tensor = torch.zeros(1, dtype=torch.int64, device=device)
     if is_master:
-        for i, c in enumerate(timestamp):
-            ts_tensor[i] = ord(c)
+        ts_tensor[0] = int(time.time())
     dist.broadcast(ts_tensor, src=0)
-    timestamp = "".join(chr(int(ts_tensor[i].item())) for i in range(14))
+    timestamp = datetime.fromtimestamp(int(ts_tensor[0].item())).strftime("%Y%m%d_%H%M%S")
 
     ckpt_root = Path(
         cfg.get("checkpoint_dir", os.environ.get("CHECKPOINT_DIR", "checkpoints"))
@@ -661,11 +664,24 @@ def train(
             dist.barrier()
 
         # ── Save-best checkpoint ───────────────────────────────────────────────
+        # CRITICAL: dcp.save() inside save_fsdp_checkpoint is a collective —
+        # ALL ranks must call it together. Each rank has its own mini-batch loss,
+        # so evaluating `current_loss < best_loss` independently per rank would
+        # cause split decisions → some ranks call dcp.save(), others skip → deadlock.
+        # Fix: rank 0 makes the decision and broadcasts it (int32 tensor) so all
+        # ranks enter or skip the DCP collective together.
         current_loss = loss.item()
-        if current_loss < best_loss:
-            best_loss = current_loss
-            if best_ckpt_dir.exists() and is_master:
-                shutil.rmtree(best_ckpt_dir)
+        save_best_t = torch.tensor(
+            int(is_master and current_loss < best_loss),
+            dtype=torch.int32, device=device,
+        )
+        dist.broadcast(save_best_t, src=0)
+
+        if save_best_t.item():
+            if is_master:
+                best_loss = current_loss
+                if best_ckpt_dir.exists():
+                    shutil.rmtree(best_ckpt_dir)
             dist.barrier()  # ensure rmtree completes before new write
             save_fsdp_checkpoint(
                 model, optimizer, step, current_loss, cfg, best_ckpt_dir,

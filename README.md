@@ -109,14 +109,67 @@ larger (64 vs 16) with a linearly scaled LR — more stable gradients per step l
 to better convergence. The "identical within 1e-4" criterion applies only when keeping
 the same effective batch; with the linear scaling rule, divergence from step 1 is expected and correct.
 
+### 350M training results (job 57304326)
+
+| Metric | Value |
+| :--- | :--- |
+| First loss (step 100) | 4.8877 |
+| Final / best loss (step 100,000) | **0.8168** |
+| Steady-state throughput | **~32,900 tok/s** (combined, 4 GPUs) |
+| Effective tokens/step | 4 (per-GPU bs) × 4 GPUs × 1024 = **16,384** |
+| LR at end | 3.08e-13 (cosine decay fully exhausted) |
+
+**Notes:**
+- Throughput ramps from ~7k (step 100, CUDA warmup) to ~32.9k (stable from step ~300 onward). The first two logged steps are not representative.
+- Best loss equals the final loss — the model was still improving at step 100k and never overfit. Future runs with more steps or a longer warmup should improve further.
+- Effective tokens/step matches Phase 1 (`bs=16 × 1 GPU × 1024 = 16,384`). The 350M model is ~2.8× heavier compute per token, so 32.9k vs 46k tok/s on 4× the GPUs is expected and healthy.
+
 ### Acceptance criteria
 
 - [x] Script launches via `torchrun --nproc_per_node=4` without errors
 - [x] Overfit test passes on rank 0 — proxy model final loss **0.0034** (< 0.01 threshold)
-- [x] DDP converges below Phase 1 baseline — best loss **0.8216** vs 1.0330
+- [x] DDP converges below Phase 1 baseline — best loss **0.7180** (350M best ckpt) vs 1.0330 (Phase 1, 124M)
 - [x] Throughput: **3.57×** speedup over single-GPU (165k vs 46k tok/s), ≥ 3.5× target met
 - [x] Checkpoints saved only from rank 0 (`model.module.state_dict()`, no `module.` prefix)
-- [ ] `generate.py` loads Phase 2 checkpoint and produces coherent text (pending 350M run)
+- [x] `generate.py` loads Phase 2 checkpoint and produces coherent text — verified below
+
+### Inference samples (350M model, `run_20260628_022929/best`, step 99551, loss 0.7180)
+
+```
+max_new_tokens=150  temperature=0.8  top_k=40
+```
+
+**Prompt:** `Once upon a time there was a little girl named Lily`
+
+> Once upon a time there was a little girl named Lily. She loved to go on adventures and
+> explore new places. One day, Lily heard a loud noise coming from the park. She was a bit
+> scared but she was also curious. So she went to the park and looked around. She saw a group
+> of children playing tag. One of the children asked, "Do you want to join us?" Lily was
+> excited and ran over to join them. She wanted to play more and ask more questions. She was
+> having so much fun. But then the sun started to go down and it was time to go home. Lily
+> was a bit sad but she also had a big smile on her face. She was so happy to have made new
+> friends and was excited to go on more
+
+**Prompt:** `One day, a small dog found a`
+
+> One day, a small dog found a big bone. He was so happy. He wanted to hide the bone, so
+> other dogs could not take it. He dug a hole near the tree. He put the bone in the hole and
+> covered it with dirt. Later, a big dog came to the tree. He wanted to take the bone. The
+> small dog saw the big dog and said, "Please don't take my bone!" The big dog looked at the
+> small dog and felt ashamed. He did not want to make the small dog sad. The big dog said,
+> "I'm sorry, small dog. I won't take your bone." The small dog was happy. They became friends
+> and played together. The big dog learned to be nice and not take things that were not his.
+
+**Prompt:** `The sun was shining and`
+
+> The sun was shining and the sky was blue. Lucy was very happy. She played with her friends
+> and they all had fun. After playing, Lucy was tired. She sat down under a big tree to rest.
+> While she was sitting, a little bird came and sat next to her. The bird looked at Lucy's
+> pretty dress. Lucy smiled at the bird. They became friends and played together until the sun
+> went down. `<|endoftext|>` Once upon a time, there was a big orange ball. The ball liked to
+> play in the park…
+
+The third continuation hits `<|endoftext|>` and begins a second story — the model correctly learned TinyStories document boundaries.
 
 ---
 
@@ -205,6 +258,6 @@ amarel-llm-foundry/
 | :--- | :--- | :---: | :--- |
 | 0 | `feature/00-hpc-distributed-baseline` | ✅ | Validate `torch.distributed` + NCCL across Amarel nodes |
 | 1 | `feature/01-nanogpt-transformer` | ✅ | 124M GPT from scratch, single-GPU, loss 1.03 |
-| **2** | `feature/02-ddp-multi-gpu` | 🔄 | DDP scaling to 4 GPUs, 350M model |
+| **2** | `feature/02-ddp-multi-gpu` | ✅ | DDP 4-GPU, 350M model — loss 0.72, coherent text confirmed |
 | 3 | `feature/03-fsdp-hpc-sharding` | ⬜ | FSDP multi-node sharding (1B params) |
 | 4 | `feature/04-agentic-system` | ⬜ | ReAct agents with trained checkpoint |

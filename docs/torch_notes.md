@@ -17,7 +17,7 @@ def train():
 
 **Why:** Python decides at compile time whether a name is local or global. If `torch` is assigned *anywhere* in the function (including via `import`), it's treated as local *everywhere* in that function — even in lines before the import.
 
-**Fix:** Always put imports at the top of the file, never inside functions.
+**Fix:** Always put imports at the top of the file, never inside functions. The rule applies to every import — `import yaml`, `import json`, `import torch._dynamo` — not just `torch` itself. Any name assigned anywhere in a function (including via `import`) is treated as local throughout the entire function.
 
 ---
 
@@ -231,3 +231,39 @@ must call all-reduce the same number of times or NCCL will hang).
 
 **Rule of thumb:** Always derive batch size from the GPU's actual memory at runtime.
 Treat the config value as a ceiling, not a target.
+
+---
+
+## 11. FSDP collectives must be called by ALL ranks — conditional saves cause deadlocks
+
+**What happened:** The save-best checkpoint block checked `current_loss < best_loss` independently on each rank. Different ranks receive different mini-batches and compute different loss values. Rank 0 decided to save (its loss was a new minimum) while another rank decided to skip. `dcp.save()` is a collective — it blocks until every rank participates. The result: rank 0 waited forever for the others; the job hung silently until NCCL timeout.
+
+**Why:** `torch.distributed.checkpoint.save()` (and `load()`) are implemented as multi-rank distributed writes. Unlike `torch.save()` which is a local file operation, DCP coordinates all ranks so each writes only its own shard. If even one rank does not call `dcp.save()`, the collective never completes.
+
+The same class of bug affects any conditional that gates a collective:
+
+```python
+# WRONG — ranks may disagree on the condition → deadlock
+if current_loss < best_loss:          # different on each rank
+    dcp.save(state, ...)              # collective: hangs if not all ranks enter
+
+# WRONG — same issue with barriers inside conditionals
+if some_rank_specific_condition:
+    dist.barrier()                    # hangs if other ranks skipped it
+```
+
+**Fix:** Have one rank (rank 0) make the decision and broadcast it as an integer tensor before the collective:
+
+```python
+# CORRECT — rank 0 decides, everyone obeys
+save_best_t = torch.tensor(
+    int(is_master and current_loss < best_loss),
+    dtype=torch.int32, device=device,
+)
+dist.broadcast(save_best_t, src=0)   # all ranks now agree
+
+if save_best_t.item():
+    dcp.save(state, ...)              # all ranks enter together ✓
+```
+
+**Rule of thumb:** Any code path that contains a collective (`dcp.save/load`, `dist.barrier`, `dist.all_reduce`, `dist.broadcast`) must be reached by ALL ranks unconditionally, or the condition must be synchronised via a broadcast first. If rank divergence is possible (per-rank loss, filesystem checks, is_master guards), synchronise before branching.

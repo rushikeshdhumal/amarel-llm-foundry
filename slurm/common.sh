@@ -40,8 +40,11 @@ export NCCL_TIMEOUT=1800
 
 # PyTorch memory and distributed settings
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-export TORCH_DISTRIBUTED_DEBUG=DETAIL
-export TORCH_CPP_LOG_LEVEL=INFO
+# TORCH_DISTRIBUTED_DEBUG=DETAIL dumps the full NCCL env for every rank on
+# startup and is very useful for debugging hangs or init failures. Set it back
+# to DETAIL when actively debugging; OFF is correct for production runs.
+export TORCH_DISTRIBUTED_DEBUG=OFF
+export TORCH_CPP_LOG_LEVEL=WARNING
 
 # Create directories
 mkdir -p $DATA_DIR $CHECKPOINT_DIR $LOG_DIR

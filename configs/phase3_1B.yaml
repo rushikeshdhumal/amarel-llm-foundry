@@ -1,0 +1,67 @@
+# Phase 03 — GPT ~1.3B (FSDP, 4 nodes × 4 GPUs = 16 GPUs)
+# Inherits base_config.yaml via OmegaConf.merge at runtime.
+# Values here override base_config.yaml where they differ.
+
+# ── Model architecture ──────────────────────────────────────────────────────────
+# n_layer=24, n_head=16, n_embd=2048:
+#   Token embedding:     50257 × 2048           ≈  103M  (weight-tied with lm_head)
+#   Positional:           1024 × 2048           ≈    2M
+#   Per TransformerBlock:
+#     Attention (Q,K,V,O): 4 × 2048²            ≈ 16.8M
+#     MLP (fc + proj):     8 × 2048²            ≈ 33.6M
+#     subtotal                                   ≈ 50.3M
+#   24 blocks:           24 × 50.3M             ≈ 1,208M
+#   Final LayerNorm + lm_head (tied):            ≈   0.1M
+#   Total                                        ≈ 1,313M  (~1.3B)
+#
+# WHY these choices:
+#   n_layer=24: same depth as Phase 2; architectural step is doubling width.
+#   n_head=16:  head_dim = 2048/16 = 128 ✅  (n_head=20 would give 102.4 — invalid)
+#   n_embd=2048: 2× Phase 2's 1024 → 4× total params (350M → 1.3B)
+n_layer: 24
+n_head: 16
+n_embd: 2048
+dropout: 0.1
+
+# ── Training ───────────────────────────────────────────────────────────────────
+# batch_size is PER GPU. With 16 GPUs: effective batch = 16 × 2 = 32 sequences/step.
+# Memory budget per rank with FSDP sharding (16 GPUs, A100-40GB):
+#   FSDP shards weights + gradients + optimizer states across all 16 ranks.
+#   Per-rank weight shard (fp16):    1313M × 2B / 16    ≈  164 MB
+#   Per-rank optimizer shard (fp32): 1313M × 8B / 16    ≈  656 MB
+#   Activations (fp16, bs=2, seq=1024, 24L):
+#     attention: 2×16×1024²×2×24                        ≈  1.6 GB
+#     MLP:       2×6×2048×1024×2×24                     ≈  1.5 GB
+#   NCCL all-gather buffer (1 FSDP unit at a time):      ≈  200 MB
+#   CUDA context overhead:                               ≈  500 MB
+#   Total:                                               ≈  4.6 GB  → fits A100-40GB
+#
+# Note: auto_batch_size() in train_fsdp.py will cap this at runtime if the
+# job lands on a GPU with less VRAM.
+batch_size: 2
+
+# Base LR (before linear scaling). train_fsdp.py applies: effective_lr = lr × world_size.
+# With world_size=16: effective_lr = 6e-5 × 16 = 9.6e-4.
+# Smaller base LR than Phase 2 (3e-4) because 1.3B models are more sensitive
+# to large gradient steps early in training.
+learning_rate: 6.0e-5
+
+grad_clip: 1.0
+
+# Longer warmup for the larger model. 5000 steps lets AdamW moment estimates
+# stabilise before the LR climbs to its peak.
+warmup_steps: 5000
+
+# 50k steps is sufficient to verify scaling and confirm loss < Phase 2 best (0.72).
+# A full production run would use 200k+ steps.
+max_steps: 50000
+
+# torch.compile requires GCC >= 4.9 (stdatomic.h). Confirm RHEL9 GCC version
+# before enabling — run the Phase 0 smoke test with use_compile=true first.
+use_compile: false
+
+# ── Logging ────────────────────────────────────────────────────────────────────
+grad_norm_log_interval: 100   # log gradient norm every N steps
+
+# ── Data ───────────────────────────────────────────────────────────────────────
+data_path: ???          # set at runtime via --data_path or $SCRATCH env

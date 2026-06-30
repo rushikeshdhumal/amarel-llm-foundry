@@ -125,7 +125,7 @@ grep "^step" $OUT | awk 'NR % 10 == 0 {print NR, $2, $4}'
 grep -i "checkpoint\|saved\|saving" $OUT
 
 # 6. Any errors, warnings, or OOM events (check both .out and .err).
-grep -i "error\|warn\|killed\|oom\|traceback" $OUT gpt_1gpu_<JOBID>.err
+grep -i "error\|warn\|killed\|oom\|traceback" $OUT <JOBNAME>_<JOBID>.err
 ```
 
 > **Tip:** The `.err` file is normally empty on a clean run. Any content there is worth reading immediately.

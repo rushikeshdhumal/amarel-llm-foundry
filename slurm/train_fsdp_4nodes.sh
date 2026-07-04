@@ -23,10 +23,13 @@
 #                         processes all trying to bind the same port → EADDRINUSE.
 #                         (Same bug fixed in Phase 0 hello_2nodes_4gpu.sh.)
 #
-# MULTI-NODE RENDEZVOUS:
-#   torchrun uses MASTER_ADDR / MASTER_PORT for the initial rendezvous.
-#   MASTER_ADDR is set to the first node in SLURM_NODELIST (see below).
-#   All 4 nodes connect to that address before any collective runs.
+# MULTI-NODE RENDEZVOUS (critical):
+#   sbatch runs this script on the FIRST node only. Calling torchrun directly
+#   would launch ONE process group that waits forever for 3 other nodes →
+#   RendezvousTimeoutError.
+#   Fix: wrap torchrun in srun so it runs once per node (--ntasks-per-node=1).
+#   Each copy uses SLURM_PROCID as --node_rank (0, 1, 2, 3).
+#   MASTER_ADDR is the first node in SLURM_NODELIST, resolved to an IP (see below).
 
 #SBATCH --job-name=gpt_fsdp_4nodes
 #SBATCH --partition=gpu-redhat
@@ -80,36 +83,36 @@ while [[ $# -gt 0 ]]; do
 done
 
 # ── Multi-node rendezvous setup ───────────────────────────────────────────────
-# Extract the first node hostname from SLURM_NODELIST.
-# SLURM_NODELIST format examples: "hal[001-004]" or "hal001,hal002,hal003,hal004".
-# scontrol show hostnames converts both to a newline-separated list.
+# Extract the first node hostname from SLURM_NODELIST and resolve to IP.
+# Hostnames alone can fail cross-node DNS; IP is more reliable (Phase 0 fix).
 MASTER_ADDR=$(scontrol show hostnames "$SLURM_NODELIST" | head -n 1)
+MASTER_ADDR=$(python3 -c "import socket; print(socket.gethostbyname('${MASTER_ADDR}'))")
 MASTER_PORT=29500
-
-echo "MASTER_ADDR:    $MASTER_ADDR"
-echo "MASTER_PORT:    $MASTER_PORT"
 
 export MASTER_ADDR
 export MASTER_PORT
 
-# ── Launch FSDP training via torchrun ─────────────────────────────────────────
-# --nnodes=$SLURM_NNODES:         number of nodes (4)
-# --nproc_per_node=4:             4 GPU workers per node
-# --node_rank=$SLURM_NODEID:      which node this task is (0, 1, 2, 3)
-# --master_addr / --master_port:  rendezvous point (node 0)
-# --rdzv_backend=c10d:            use PyTorch's c10d rendezvous (TCP-based).
-#   This is the correct backend for multi-node jobs with a known MASTER_ADDR.
-#   The alternative "etcd" requires a separate etcd service and is not available
-#   on Amarel.
-# -m src.train_fsdp:              module invocation from repo root
-torchrun \
-    --nnodes="$SLURM_NNODES" \
+echo "MASTER_ADDR:    $MASTER_ADDR"
+echo "MASTER_PORT:    $MASTER_PORT"
+echo "SLURM_NNODES:   $SLURM_NNODES"
+echo "SLURM_NTASKS:   $SLURM_NTASKS"
+
+# ── Launch FSDP training via srun + torchrun ──────────────────────────────────
+# srun with --ntasks-per-node=1 runs this command ONCE PER NODE.
+# SLURM_PROCID is 0 on node 0, 1 on node 1, … → correct --node_rank.
+# torchrun then spawns --nproc_per_node=4 worker processes within each node.
+#
+# Works for single-node baselines too: sbatch --nodes=1 runs srun once on one node.
+#
+# --rdzv_backend=c10d: TCP rendezvous at MASTER_ADDR:MASTER_PORT (no etcd on Amarel).
+srun --label torchrun \
+    --nnodes="${SLURM_NNODES}" \
     --nproc_per_node=4 \
-    --node_rank="$SLURM_NODEID" \
-    --master_addr="$MASTER_ADDR" \
-    --master_port="$MASTER_PORT" \
+    --node_rank="${SLURM_PROCID}" \
+    --master_addr="${MASTER_ADDR}" \
+    --master_port="${MASTER_PORT}" \
     --rdzv_backend=c10d \
-    --rdzv_endpoint="$MASTER_ADDR:$MASTER_PORT" \
+    --rdzv_endpoint="${MASTER_ADDR}:${MASTER_PORT}" \
     -m src.train_fsdp \
     --config "$CONFIG" \
     --data_path "$TRAIN_DATA" \

@@ -56,6 +56,9 @@ warmup_steps: 5000
 # A full production run would use 200k+ steps.
 max_steps: 50000
 
+# Only write run_<ts>/best/ — skip periodic step_* and _final (saves ~800 GB on scratch).
+save_best_only: true
+
 # torch.compile requires GCC >= 4.9 (stdatomic.h). Confirm RHEL9 GCC version
 # before enabling — run the Phase 0 smoke test with use_compile=true first.
 use_compile: false

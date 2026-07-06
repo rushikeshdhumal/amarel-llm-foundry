@@ -345,3 +345,22 @@ A **checkpoint** saves model (+ optionally optimizer) state so training can resu
 | **FSDP sharding** | Memory split evenly across GPUs | All ranks show same `static_shard` and `mem alloc` |
 | **LR at step 100** | Warmup schedule is active | `≈ max_lr × 100 / warmup_steps` |
 | **Throughput baseline** | Steady tok/s before scaling comparison | Average tok/s from steps 300+ on 1 node |
+
+---
+
+## 11. Phase 4 evaluation metrics
+
+Phase 4 measures checkpoints on a **fixed TinyStories validation memmap** (`val.bin`), pretokenized with the same BPE rules as training.
+
+| Metric | Formula | Notes |
+| :--- | :--- | :--- |
+| **Val loss** | Mean cross-entropy over non-overlapping windows | Same `(x, y)` slicing as training; stride = `seq_len + 1` |
+| **Perplexity** | `exp(val_loss)` | Average branching factor at each token; lower is better |
+| **Bits per token** | `val_loss / ln(2)` | Information content in bits; comparable across models |
+
+**Comparison caveats (required in benchmark report):**
+
+- Project models: TinyStories pretrain. GPT-2 baselines: WebText pretrain.
+- Same GPT-2 BPE tokenizer — tokenizer-fair, **not** training-data-fair.
+- Phase 3 (~1.3B, 24L×2048D) vs `gpt2-xl` (~1.5B, 48L×1600D) is a **param-count approximate** comparison, not architecture-matched.
+- GPT-2 may look worse on TinyStories val than in-domain project models — that reflects domain mismatch, not necessarily worse modeling.

@@ -18,7 +18,7 @@ There is **no new large-scale training** in this phase. Work is limited to:
 
 ---
 
-## What we're building
+## What was built
 
 | File | Purpose |
 | :--- | :--- |
@@ -147,7 +147,7 @@ pip install transformers>=4.36.0   # GPT-2 baselines only; add to env once
 export HF_HOME=$SCRATCH/hf_cache     # cache HF model weights on scratch
 ```
 
-Phase 1–2 checkpoints must exist under `$SCRATCH/checkpoints/`. Phase 3 export is optional.
+Phase 1–2 checkpoints must exist under `$SCRATCH/checkpoints/`. After Phase 3 training completes, export the DCP `best/` checkpoint before eval.
 
 ### Step 0 — Build validation set
 
@@ -164,7 +164,9 @@ $SCRATCH/data/tinystories/tokenized/val.bin
 $SCRATCH/data/tinystories/tokenized/val_meta.yaml
 ```
 
-### Step 1 — Export Phase 3 (if needed)
+### Step 1 — Export Phase 3
+
+After Phase 3 FSDP training completes:
 
 ```bash
 sbatch slurm/export_checkpoint.sh \

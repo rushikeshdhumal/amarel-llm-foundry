@@ -13,6 +13,8 @@ dependencies = [
     "omegaconf>=2.3.0",
     "datasets>=2.14.0",
     "wandb>=0.15.0",
+    "transformers>=4.36.0",
+    "pyyaml>=6.0",
 ]
 
 [build-system]

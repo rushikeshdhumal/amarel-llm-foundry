@@ -1,6 +1,6 @@
 # Amarel LLM Foundry
 
-A **5-phase, branch-per-phase** project that builds a GPT-style language model from scratch on [Amarel](https://oarc.rutgers.edu/amarel/) (Rutgers HPC) — from a distributed "hello world" to multi-node FSDP training and, eventually, a multi-agent system.
+A **5-phase, branch-per-phase** project that builds a GPT-style language model from scratch on [Amarel](https://oarc.rutgers.edu/amarel/) (Rutgers HPC) — from a distributed "hello world" through multi-node FSDP training to reproducible evaluation and project closure.
 
 **Stack:** pure PyTorch (`torch.nn`), SLURM, NCCL, TinyStories, tiktoken. No HuggingFace Trainer, no PyTorch Lightning.
 
@@ -17,7 +17,7 @@ main                          ← you are here (overview only)
  ├── feature/01-nanogpt-transformer
  ├── feature/02-ddp-multi-gpu
  ├── feature/03-fsdp-hpc-sharding
- └── feature/04-agentic-system
+ └── feature/04-eval-closure
 ```
 
 **Workflow for each phase:**
@@ -49,7 +49,7 @@ Phases are **sequential** — later phases reuse modules from earlier ones (`mod
 | **1** | [`feature/01-nanogpt-transformer`](https://github.com/rushikeshdhumal/amarel-llm-foundry/tree/feature/01-nanogpt-transformer) | GPT-2 transformer from scratch, single-GPU training, inference | ~124M params, 1 GPU |
 | **2** | [`feature/02-ddp-multi-gpu`](https://github.com/rushikeshdhumal/amarel-llm-foundry/tree/feature/02-ddp-multi-gpu) | `DistributedDataParallel` on one node | ~350M params, 4 GPUs |
 | **3** | [`feature/03-fsdp-hpc-sharding`](https://github.com/rushikeshdhumal/amarel-llm-foundry/tree/feature/03-fsdp-hpc-sharding) | `FullyShardedDataParallel` across nodes, sharded checkpoints | ~1.3B params, 4 nodes × 4 GPUs |
-| **4** | [`feature/04-agentic-system`](https://github.com/rushikeshdhumal/amarel-llm-foundry/tree/feature/04-agentic-system) | ReAct-style agents using the trained checkpoint | inference + tools |
+| **4** | [`feature/04-eval-closure`](https://github.com/rushikeshdhumal/amarel-llm-foundry/tree/feature/04-eval-closure) | Eval harness, GPT-2 benchmark, archive results, close the project | val perplexity + `transformers` baselines |
 
 Instruction blueprints for every phase sit in [`instructions/`](instructions/). Shared agent rules: [`instructions/GLOBAL.md`](instructions/GLOBAL.md).
 
@@ -65,11 +65,12 @@ Token IDs → Embedding + Positional encoding
          → LayerNorm → LM head → next-token logits
 ```
 
-| Phase | Model | Parallelism | Key idea |
+| Phase | Model / work | Parallelism | Key idea |
 | :---: | :--- | :--- | :--- |
 | 1 | 124M | 1 GPU | Baseline training loop, AMP, checkpoints |
 | 2 | 350M | DDP (full replica per GPU) | Data parallelism + linear LR scaling |
 | 3 | 1.3B | FSDP (sharded params/grads/optimizer) | Model too large to replicate; shard across 16 GPUs |
+| 4 | — | 1 GPU (+ multi-GPU export) | TinyStories val eval, GPT-2 comparison, no new training |
 
 ---
 
@@ -99,9 +100,11 @@ git fetch && git checkout feature/01-nanogpt-transformer   # pick your phase
 sbatch slurm/train_1gpu.sh          # Phase 1 example
 sbatch slurm/train_ddp_4gpu.sh      # Phase 2
 sbatch slurm/train_fsdp_4nodes.sh   # Phase 3
+sbatch slurm/pretokenize_val.sh     # Phase 4 — build val.bin
+sbatch slurm/eval.sh                # Phase 4 — eval + GPT-2 benchmark
 ```
 
-Checkpoints and data go on **`$SCRATCH`** (not `$HOME`) — scratch is fast but not backed up; copy best checkpoints to `~/checkpoints/` for durability.
+Checkpoints and data go on **`$SCRATCH`** (not `$HOME`) — scratch is fast but not backed up; copy best checkpoints to `~/checkpoints/` for durability. Phase 3 FSDP checkpoints need export to `model.pt` before single-GPU eval (see [`instructions/PHASE-04-eval-closure.md`](instructions/PHASE-04-eval-closure.md)).
 
 ---
 

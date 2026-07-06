@@ -1,7 +1,7 @@
 # Phase 3 — FSDP Multi-Node Sharding
 
 **Branch**: `feature/03-fsdp-hpc-sharding`  
-**Project**: [Amarel LLM Foundry](https://github.com/rushikeshdhumal/amarel-llm-foundry) — 5-phase journey from SLURM hello-world to a multi-agent system.
+**Project**: [Amarel LLM Foundry](https://github.com/rushikeshdhumal/amarel-llm-foundry) — 5-phase journey from SLURM hello-world to scaled GPT training and reproducible evaluation on Amarel HPC.
 
 ---
 
@@ -190,6 +190,8 @@ grep -i "error\|nccl\|timeout\|killed\|oom" $OUT $ERR
 cp -r $CHECKPOINT_DIR/run_<ts>/best ~/checkpoints/phase3_best/
 ```
 
+Phase 4 (`feature/04-eval-closure`) will export this DCP checkpoint to `model.pt` before single-GPU eval and GPT-2 benchmarking. See `instructions/PHASE-04-eval-closure.md`.
+
 ---
 
 ## Key differences from Phase 2 (DDP)
@@ -249,4 +251,4 @@ amarel-llm-foundry/
 | 1 | `feature/01-nanogpt-transformer` | ✅ | 124M GPT from scratch, single-GPU, loss 1.03 |
 | 2 | `feature/02-ddp-multi-gpu` | ✅ | DDP 4-GPU, 350M model — loss 0.72, coherent text confirmed |
 | **3** | `feature/03-fsdp-hpc-sharding` | 🔄 | FSDP 4-node, 1.3B model |
-| 4 | `feature/04-agentic-system` | ⬜ | ReAct agents with trained checkpoint |
+| 4 | `feature/04-eval-closure` | ⬜ | Eval harness, GPT-2 benchmark, project closure |

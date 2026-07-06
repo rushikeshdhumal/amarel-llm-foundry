@@ -578,6 +578,7 @@ def train(
     run_dir = ckpt_root / f"run_{timestamp}"
     best_ckpt_dir = run_dir / "best"
     best_loss = float("inf")
+    save_best_only: bool = cfg.get("save_best_only", False)
 
     # ── Training loop ─────────────────────────────────────────────────────────
     model.train()
@@ -590,6 +591,8 @@ def train(
             f"\n── Training (steps {start_step} → {cfg.max_steps},"
             f" world_size={world_size}) ──"
         )
+        if save_best_only:
+            print("Checkpoint policy: best-only (no step_* or _final saves)")
 
     while step < cfg.max_steps:
         try:
@@ -654,13 +657,14 @@ def train(
         if is_master and step % cfg.grad_norm_log_interval == 0:
             print(f"  grad_norm = {grad_norm:.4f}")
 
-        # ── Checkpointing (all ranks participate via DCP) + barrier ───────────
-        if step % cfg.save_interval == 0:
+        # ── Periodic step checkpoints (optional) ────────────────────────────────
+        # When save_best_only=true (phase3_1B.yaml), skip step_* saves to avoid
+        # filling $SCRATCH — each DCP checkpoint is ~8 GB × 100 steps ≈ 800 GB.
+        if not save_best_only and step % cfg.save_interval == 0:
             save_fsdp_checkpoint(
                 model, optimizer, step, loss.item(), cfg,
                 run_dir / f"step_{step:07d}",
             )
-            # Barrier ensures all ranks finish writing before any proceeds.
             dist.barrier()
 
         # ── Save-best checkpoint ───────────────────────────────────────────────
@@ -688,13 +692,15 @@ def train(
             )
         dist.barrier()
 
-    # ── Final checkpoint ──────────────────────────────────────────────────────
-    save_fsdp_checkpoint(
-        model, optimizer, step, loss.item(), cfg,
-        run_dir / f"step_{step:07d}_final",
-    )
+    # ── Final checkpoint (optional) ───────────────────────────────────────────
+    if not save_best_only:
+        save_fsdp_checkpoint(
+            model, optimizer, step, loss.item(), cfg,
+            run_dir / f"step_{step:07d}_final",
+        )
     if is_master:
-        print(f"\nTraining complete. Checkpoints: {run_dir}")
+        ckpt_note = f"{run_dir}/best" if save_best_only else str(run_dir)
+        print(f"\nTraining complete. Checkpoints: {ckpt_note}")
 
     dist.barrier()
 

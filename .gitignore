@@ -46,3 +46,6 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+
+# docs
+docs/maintenance_schedule.md

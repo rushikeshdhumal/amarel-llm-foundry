@@ -1,0 +1,27 @@
+# val_path uses $SCRATCH — expanded at runtime via os.path.expandvars
+val_path: /scratch/$USER/data/tinystories/tokenized/val.bin
+
+eval_results_dir: /scratch/$USER/eval_results
+benchmark_results_dir: /scratch/$USER/benchmark_results
+
+prompts:
+  - "Once upon a time there was a little girl named Lily"
+  - "The sun was shining and"
+  - "In a surprising turn of events, the company announced"
+
+sampling:
+  max_new_tokens: 150
+  temperature: 0.8
+  top_k: 40
+
+gpt2_models:
+  - gpt2
+  - gpt2-medium
+  - gpt2-large
+  - gpt2-xl
+
+# Required footnote in generated report.md
+comparison_footnote: >
+  Our models: TinyStories pretrain. GPT-2: WebText. Same GPT-2 BPE tokenizer;
+  Phase 3 vs gpt2-xl is param-count approximate, not architecture-matched.
+  Not matched on training tokens or corpus.

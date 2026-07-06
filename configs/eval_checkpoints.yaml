@@ -1,0 +1,13 @@
+# Set paths to exported checkpoint dirs (each must contain model.pt + config.yaml).
+# $SCRATCH is expanded at runtime.
+
+checkpoints:
+  - name: phase1_124M
+    path: /scratch/$USER/checkpoints/run_<phase1_ts>/best
+
+  - name: phase2_350M
+    path: /scratch/$USER/checkpoints/run_<phase2_ts>/best
+
+  # After FSDP export (Phase 3 training complete):
+  - name: phase3_1B
+    path: /scratch/$USER/checkpoints/run_<phase3_ts>/best_export

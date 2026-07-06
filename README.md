@@ -1,7 +1,7 @@
 # Phase 1 — NanoGPT Transformer
 
 **Branch**: `feature/01-nanogpt-transformer`  
-**Project**: [Amarel LLM Foundry](https://github.com/rushikeshdhumal/amarel-llm-foundry) — 5-phase journey from SLURM hello-world to a multi-agent system.
+**Project**: [Amarel LLM Foundry](https://github.com/rushikeshdhumal/amarel-llm-foundry) — 5-phase journey from SLURM hello-world to scaled GPT training and reproducible evaluation on Amarel HPC.
 
 ---
 
@@ -174,6 +174,8 @@ cp -r $SCRATCH/checkpoints/run_<ts>/step_0093000 ~/checkpoints/phase1_best/
 > Phase 2+ runs will also produce a `best/` directory inside the run folder
 > (overwritten whenever loss improves) so the exact best step is always captured.
 
+Phase 4 (`feature/04-eval-closure`) evaluates Phase 1 checkpoints on TinyStories val perplexity. Use `run_<ts>/best` if present, otherwise the lowest-loss `step_*` dir (both contain `model.pt` + `config.yaml` — no export step). See `instructions/PHASE-04-eval-closure.md`.
+
 ### Run inference on a checkpoint
 
 ```bash
@@ -249,3 +251,15 @@ amarel-llm-foundry/
 | `hello_1node_1gpu.sh` | ✅ `[Rank 0/1] Host: gpu030  device=NVIDIA L40S` |
 | `hello_1node_4gpu.sh` | ✅ Ranks 0–3 on `gpuk002` (A100-PCIE-40GB) |
 | `hello_2nodes_4gpu.sh` | ✅ Ranks 0–3 across `gpuk002`+`gpuk003` (A100-PCIE-40GB) — NCCL 2.21.5 |
+
+---
+
+## Project map
+
+| Phase | Branch | Status | Goal |
+| :--- | :--- | :---: | :--- |
+| 0 | `feature/00-hpc-distributed-baseline` | ✅ | Validate `torch.distributed` + NCCL across Amarel nodes |
+| **1** | `feature/01-nanogpt-transformer` | ✅ | 124M GPT from scratch, single-GPU, loss 1.03 |
+| 2 | `feature/02-ddp-multi-gpu` | ⬜ | DDP 4-GPU, 350M model |
+| 3 | `feature/03-fsdp-hpc-sharding` | ⬜ | FSDP 4-node, 1.3B model |
+| 4 | `feature/04-eval-closure` | ⬜ | Eval harness, GPT-2 benchmark, project closure |

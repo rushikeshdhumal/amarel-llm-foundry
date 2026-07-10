@@ -267,5 +267,6 @@ If a job in the chain fails, all downstream jobs with `afterok` dependencies are
 | Job stuck in `PD` > 30 min | Check `%R` reason; try `--partition=gpu_long` or reduce resources |
 | Multi-node job hangs at barrier | Run `ip a` in interactive session, confirm `NCCL_SOCKET_IFNAME` matches actual interface |
 | `RendezvousTimeoutError` at job start | `torchrun` was called without `srun` — only the head node joined. Wrap in `srun --label torchrun … --node_rank=$SLURM_PROCID` (see `hello_2nodes_4gpu.sh`) |
+| `FileNotFoundError: …/src/train_fsdp.py` on multi-node | Submit from `/scratch/$USER/amarel-llm-foundry` (not `$HOME`). `train_fsdp_4nodes.sh` runs a preflight `srun --chdir=$SLURM_SUBMIT_DIR` check before launching. `/scratch` is the same path on `gpu*` and `gpuk*` nodes — no `scache` workaround needed. |
 | `CUDA_VISIBLE_DEVICES` mismatch | Ensure `--nproc_per_node` == `--gres=gpu:N` |
 | `.err` file has `srun: error: PMK_KVS` | Switch `--rdzv_backend` to `env` or `c10d` |

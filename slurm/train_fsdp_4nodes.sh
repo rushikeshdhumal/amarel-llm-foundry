@@ -1,7 +1,8 @@
 #!/bin/bash
 # train_fsdp_4nodes.sh — Multi-node, 4-node × 4-GPU FSDP training job (Phase 03).
 #
-# Submit from repo root:
+# Submit from repo root on scratch (required for multi-node path visibility):
+#   cd /scratch/$USER/amarel-llm-foundry
 #   sbatch slurm/train_fsdp_4nodes.sh
 #
 # Resume from a sharded DCP checkpoint:
@@ -97,6 +98,26 @@ echo "MASTER_PORT:    $MASTER_PORT"
 echo "SLURM_NNODES:   $SLURM_NNODES"
 echo "SLURM_NTASKS:   $SLURM_NTASKS"
 
+# ── Ensure Python finds src/ on every node ────────────────────────────────────
+# train_fsdp.py loads configs with relative paths (configs/base_config.yaml),
+# so every rank must start in the repo root. --chdir pins the cwd per srun task;
+# PYTHONPATH is a fallback if cwd propagation differs across node pools.
+export PYTHONPATH="${SLURM_SUBMIT_DIR}:${PYTHONPATH:-}"
+export CONFIG TRAIN_DATA RESUME_FLAG
+
+# ── Preflight: verify repo is visible on ALL allocated nodes ──────────────────
+# Fails fast (before 16 GPUs spin up torchrun) if any node cannot see the repo.
+# Requires submitting from the scratch clone:
+#   cd /scratch/$USER/amarel-llm-foundry && sbatch slurm/train_fsdp_4nodes.sh
+echo "── Preflight: verifying repo on all nodes ──"
+if ! srun --chdir="$SLURM_SUBMIT_DIR" --label /bin/bash -c \
+    'test -f src/train_fsdp.py && test -f configs/phase3_1B.yaml && echo "OK: $(hostname) $PWD"'; then
+    echo "ERROR: repo not found at $SLURM_SUBMIT_DIR on one or more nodes."
+    echo "Submit from: /scratch/$USER/amarel-llm-foundry"
+    exit 1
+fi
+echo "Preflight: all nodes can access the repo."
+
 # ── Launch FSDP training via srun + torchrun ──────────────────────────────────
 # srun with --ntasks-per-node=1 runs this command ONCE PER NODE.
 # SLURM_PROCID is 0 on node 0, 1 on node 1, … → correct --node_rank.
@@ -105,15 +126,20 @@ echo "SLURM_NTASKS:   $SLURM_NTASKS"
 # Works for single-node baselines too: sbatch --nodes=1 runs srun once on one node.
 #
 # --rdzv_backend=c10d: TCP rendezvous at MASTER_ADDR:MASTER_PORT (no etcd on Amarel).
-srun --label torchrun \
-    --nnodes="${SLURM_NNODES}" \
+#
+# bash -c with single quotes: $SLURM_PROCID is expanded inside each srun task's
+# shell (not once by the batch-script bash), giving each node a unique --node_rank.
+srun --chdir="$SLURM_SUBMIT_DIR" --label /bin/bash -c '
+exec torchrun \
+    --nnodes=$SLURM_NNODES \
     --nproc_per_node=4 \
-    --node_rank="${SLURM_PROCID}" \
-    --master_addr="${MASTER_ADDR}" \
-    --master_port="${MASTER_PORT}" \
+    --node_rank=$SLURM_PROCID \
+    --master_addr=$MASTER_ADDR \
+    --master_port=$MASTER_PORT \
     --rdzv_backend=c10d \
-    --rdzv_endpoint="${MASTER_ADDR}:${MASTER_PORT}" \
+    --rdzv_endpoint=$MASTER_ADDR:$MASTER_PORT \
     -m src.train_fsdp \
     --config "$CONFIG" \
     --data_path "$TRAIN_DATA" \
     $RESUME_FLAG
+'

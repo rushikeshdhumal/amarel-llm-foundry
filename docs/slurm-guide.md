@@ -259,6 +259,84 @@ If a job in the chain fails, all downstream jobs with `afterok` dependencies are
 
 ---
 
+## Checking storage quota
+
+`df -h` shows **cluster-wide** free space, not your per-user quota. `quota -s` is not available on Amarel — use **`mmlsquota`** instead.
+
+```bash
+# Home (/home lives on the cache filesystem)
+mmlsquota --block-size=auto cache
+
+# Scratch
+mmlsquota --block-size=auto scratch
+```
+
+Read the `blocks` (used), `quota` (soft limit), and `grace` columns. When usage exceeds `quota` and `grace` shows `expired`, **writes fail** with `OSError: [Errno 122] Disk quota exceeded` — even reads/imports can break.
+
+Typical limits: **home ~100 GB**, **scratch ~1 TB** (files auto-purged after 90 days of no access).
+
+### Login node vs `gpuk*` compute nodes
+
+Quota reported on a **login node** can differ from what **compute nodes** enforce. Example observed on this project:
+
+| Where checked | Fileset | Used | Quota | Grace |
+|---|---|---|---|---|
+| Login (`amarel4`) | `root` | 17 GB | 1 TB | none |
+| Compute (`gpuk004`) | `scratch` | **1.32 TB** | 1 TB | **expired** |
+
+For `gpu-redhat` jobs, always verify scratch quota **from a compute node**:
+
+```bash
+srun --partition=gpu-redhat --nodelist=gpuk[001-030] \
+     --nodes=1 --gres=gpu:1 --time=00:05:00 \
+     /bin/bash -c 'hostname; mmlsquota --block-size=auto scratch'
+```
+
+### Finding large files to delete
+
+```bash
+du -sh /scratch/$USER/* | sort -h
+du -sh /scratch/$USER/checkpoints/run_* 2>/dev/null | sort -h
+find /scratch/$USER -type f -size +1G 2>/dev/null | head -20
+```
+
+FSDP DCP checkpoints (`checkpoints/run_*/best/`) are the most common cause of scratch over-quota — each 1.3B run can be tens of GB; failed or superseded runs add up fast. Delete runs you no longer need:
+
+```bash
+rm -rf /scratch/$USER/checkpoints/run_<old_timestamp>
+```
+
+Re-check until `blocks` is **below** `quota` on a compute node before resubmitting.
+
+### Ghost quota (`du` ≪ `mmlsquota`) — contact OARC
+
+If `du -sh /scratch/$USER` on a `gpuk` node shows only a few GB but `mmlsquota` reports **> 1 TB** with `grace: expired`, the quota counter is **stale** — deleting files will not help. This was observed when `du` showed ~9 GB but DSSK (`gpuk*`) quota showed 1.32 TB.
+
+Confirm with:
+
+```bash
+srun --partition=gpu-redhat --nodelist=gpuk004 \
+     --nodes=1 --gres=gpu:1 --time=00:10:00 \
+     /bin/bash -c 'du -sh /scratch/$USER; mmlsquota --block-size=auto scratch'
+```
+
+If `du` ≪ `mmlsquota`, email **help@oarc.rutgers.edu** with:
+- Username
+- Both `mmlsquota` outputs (login + `gpuk`)
+- `du -sh /scratch/$USER` from login and from `srun` on `gpuk`
+- Job ID that failed with `Errno 122`
+
+**Workaround:** run on non-`gpuk` nodes in the DSSP domain until OARC resets quota:
+
+```bash
+# 1-node test on a standard gpu node (confirmed working earlier)
+sbatch --nodes=1 --nodelist=gpu028 slurm/train_fsdp_4nodes.sh
+```
+
+`gpu-redhat` jobs that land on `gpuk*` will keep failing until DSSK quota is reconciled.
+
+---
+
 ## Quick Troubleshooting
 
 | Symptom | Fix |
@@ -268,5 +346,6 @@ If a job in the chain fails, all downstream jobs with `afterok` dependencies are
 | Multi-node job hangs at barrier | Run `ip a` in interactive session, confirm `NCCL_SOCKET_IFNAME` matches actual interface |
 | `RendezvousTimeoutError` at job start | `torchrun` was called without `srun` — only the head node joined. Wrap in `srun --label torchrun … --node_rank=$SLURM_PROCID` (see `hello_2nodes_4gpu.sh`) |
 | `FileNotFoundError: …/src/train_fsdp.py` on multi-node | Submit from `/scratch/$USER/amarel-llm-foundry` (not `$HOME`). `train_fsdp_4nodes.sh` runs a preflight `srun --chdir=$SLURM_SUBMIT_DIR` check before launching. `/scratch` is the same path on `gpu*` and `gpuk*` nodes — no `scache` workaround needed. |
+| `OSError: [Errno 122] Disk quota exceeded` at import | Check scratch on a `gpuk` node: `srun … du -sh /scratch/$USER; mmlsquota --block-size=auto scratch`. If `du` is small but `mmlsquota` > 1 TB (grace expired), quota is stale — email **help@oarc.rutgers.edu**. If `du` is large, delete `checkpoints/run_*` until under 1 TB. |
 | `CUDA_VISIBLE_DEVICES` mismatch | Ensure `--nproc_per_node` == `--gres=gpu:N` |
 | `.err` file has `srun: error: PMK_KVS` | Switch `--rdzv_backend` to `env` or `c10d` |

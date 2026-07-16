@@ -26,6 +26,15 @@ export DATA_DIR=$SCRATCH/data
 export CHECKPOINT_DIR=$SCRATCH/checkpoints
 export LOG_DIR=$SCRATCH/logs
 
+# Keep all job-time caches off $HOME — home quota is small (~10 GB on Amarel).
+# Without these, PyTorch/tiktoken/conda write to /cache/home/$USER and can
+# trigger OSError: [Errno 122] Disk quota exceeded during import.
+export TMPDIR=$SCRATCH/tmp
+export XDG_CACHE_HOME=$SCRATCH/cache
+export TORCH_HOME=$SCRATCH/torch_cache
+export HF_HOME=$SCRATCH/hf_cache
+export PYTHONDONTWRITEBYTECODE=1   # skip __pycache__ writes in the repo tree
+
 # NCCL tuning for multi-node
 # PyTorch 2.x renamed NCCL_ASYNC_ERROR_HANDLING → TORCH_NCCL_ASYNC_ERROR_HANDLING.
 export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
@@ -47,6 +56,7 @@ export TORCH_DISTRIBUTED_DEBUG=OFF
 export TORCH_CPP_LOG_LEVEL=WARNING
 
 # Create directories
-mkdir -p $DATA_DIR $CHECKPOINT_DIR $LOG_DIR
+mkdir -p $DATA_DIR $CHECKPOINT_DIR $LOG_DIR \
+         $TMPDIR $XDG_CACHE_HOME $TORCH_HOME $HF_HOME
 
 echo "Amarel environment ready. SCRATCH=$SCRATCH"

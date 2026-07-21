@@ -5,8 +5,10 @@
 #   cd /scratch/$USER/amarel-llm-foundry
 #   sbatch slurm/train_fsdp_4nodes.sh
 #
-# Resume from a sharded DCP checkpoint:
-#   sbatch slurm/train_fsdp_4nodes.sh --resume $CHECKPOINT_DIR/run_<ts>/step_<N>
+# Resume from a complete DCP checkpoint (prefer last/, fall back to best/):
+#   ls -la $CHECKPOINT_DIR/run_<ts>/last/.metadata   # must exist
+#   sbatch slurm/train_fsdp_4nodes.sh --resume $CHECKPOINT_DIR/run_<ts>/last
+#   # if last is incomplete: --resume …/best
 #
 # Baseline comparison (1 node, 4 GPUs, same config — for scaling efficiency check):
 #   sbatch --nodes=1 slurm/train_fsdp_4nodes.sh --config configs/phase3_1B.yaml

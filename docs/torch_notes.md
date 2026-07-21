@@ -267,3 +267,25 @@ if save_best_t.item():
 ```
 
 **Rule of thumb:** Any code path that contains a collective (`dcp.save/load`, `dist.barrier`, `dist.all_reduce`, `dist.broadcast`) must be reached by ALL ranks unconditionally, or the condition must be synchronised via a broadcast first. If rank divergence is possible (per-rank loss, filesystem checks, is_master guards), synchronise before branching.
+
+---
+
+## 12. Keep `best/` and a single overwritten `last/` (atomic `last.tmp`)
+
+**What happened:** With only `best/`, a 24h SLURM kill mid-`dcp.save()` left a directory with some `__*_0.distcp` shards but **no `.metadata`**. Resume failed with confusing `FileNotFoundError`s.
+
+**Fix:** Always maintain exactly two durable dirs under `run_<ts>/` (not a growing history):
+
+| Dir | When written | Disk |
+|---|---|---|
+| `best/` | New lowest loss (in-place replace) | 1× DCP |
+| `last/` | Every `save_interval` steps (+ end) via **`last.tmp` → rename** | 1× DCP steady-state; briefly 2× while writing |
+
+`save_fsdp_checkpoint(..., atomic=True)` writes to `last.tmp`, validates (`.metadata` + all shards + `meta.yaml`), then replaces `last/`. A kill mid-write leaves the previous complete `last/` intact; delete any leftover `last.tmp` if present.
+
+`validate_fsdp_checkpoint()` also runs before load. Prefer `--resume …/last`; fall back to `…/best`.
+
+```bash
+ls -la $CHECKPOINT_DIR/run_<ts>/last/.metadata
+rm -rf $CHECKPOINT_DIR/run_<ts>/last.tmp   # safe leftover from a killed write
+```

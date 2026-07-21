@@ -306,6 +306,42 @@ def auto_batch_size(
 
 # ── Sharded checkpoint save/load ───────────────────────────────────────────────
 
+def validate_fsdp_checkpoint(ckpt_dir: Path, world_size: int) -> None:
+    """
+    Fail fast if a DCP directory is incomplete (typical after a SLURM kill mid-save).
+
+    A complete checkpoint must contain:
+      - .metadata          (written last by DCP; missing ⇒ corrupt)
+      - __{r}_0.distcp     for r in 0 … world_size-1
+      - meta.yaml          (our step/loss sidecar)
+    """
+    if not ckpt_dir.is_dir():
+        raise FileNotFoundError(f"Checkpoint directory not found: {ckpt_dir}")
+
+    if not (ckpt_dir / ".metadata").is_file():
+        raise FileNotFoundError(
+            f"Incomplete DCP checkpoint (missing .metadata): {ckpt_dir}\n"
+            "The previous job was likely killed while writing this directory.\n"
+            "Resume from the other complete checkpoint instead "
+            f"(try sibling best/ or last/ under {ckpt_dir.parent})."
+        )
+
+    missing = [
+        f"__{r}_0.distcp"
+        for r in range(world_size)
+        if not (ckpt_dir / f"__{r}_0.distcp").is_file()
+    ]
+    if missing:
+        raise FileNotFoundError(
+            f"Incomplete DCP checkpoint at {ckpt_dir}: missing {missing}"
+        )
+
+    if not (ckpt_dir / "meta.yaml").is_file():
+        raise FileNotFoundError(
+            f"Incomplete checkpoint (missing meta.yaml): {ckpt_dir}"
+        )
+
+
 def save_fsdp_checkpoint(
     model: FSDP,
     optimizer: torch.optim.Optimizer,
@@ -313,6 +349,8 @@ def save_fsdp_checkpoint(
     loss: float,
     cfg: DictConfig,
     ckpt_dir: Path,
+    *,
+    atomic: bool = False,
 ) -> None:
     """
     Save a sharded FSDP checkpoint using torch.distributed.checkpoint (DCP).
@@ -321,15 +359,29 @@ def save_fsdp_checkpoint(
     is never gathered on a single GPU, so this is safe even at 1.3B params.
     rank 0 additionally writes a metadata file (step, loss, config).
 
+    When atomic=True (used for last/), write into ckpt_dir.tmp first, validate,
+    then rank 0 replaces ckpt_dir. Peak disk is briefly ~2× one DCP size; after
+    the swap only one last/ remains. A SLURM kill mid-write leaves the previous
+    complete last/ intact (plus a disposable last.tmp).
+
+    After a successful write, validate_fsdp_checkpoint() fails fast if DCP's
+    .metadata or any shard is missing.
+
     WHY NOT torch.save(model.state_dict())?
       With FSDP's default (FULL_STATE_DICT), state_dict() gathers all params
       onto rank 0 in fp32: 1.3B × 4 B ≈ 5.2 GB — OOM. DCP avoids the gather.
     """
-    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    write_dir = Path(f"{ckpt_dir}.tmp") if atomic else ckpt_dir
+
+    if dist.get_rank() == 0:
+        if write_dir.exists():
+            shutil.rmtree(write_dir)
+        write_dir.mkdir(parents=True, exist_ok=True)
+    dist.barrier()
 
     # DCP state: model shards + optimizer shards.
     state = {"model": model, "optimizer": optimizer}
-    dcp.save(state, checkpoint_id=str(ckpt_dir))
+    dcp.save(state, checkpoint_id=str(write_dir))
 
     # Rank 0 writes human-readable metadata alongside the shard files.
     if dist.get_rank() == 0:
@@ -338,8 +390,20 @@ def save_fsdp_checkpoint(
             "loss": float(loss),
             "config": OmegaConf.to_container(cfg, resolve=True),
         }
-        with open(ckpt_dir / "meta.yaml", "w") as f:
+        with open(write_dir / "meta.yaml", "w") as f:
             yaml.dump(meta, f)
+
+    dist.barrier()
+    validate_fsdp_checkpoint(write_dir, dist.get_world_size())
+
+    if atomic:
+        # Swap only after a complete, validated write. Previous last/ stays
+        # valid if we die before this block finishes.
+        if dist.get_rank() == 0:
+            if ckpt_dir.exists():
+                shutil.rmtree(ckpt_dir)
+            write_dir.rename(ckpt_dir)
+        dist.barrier()
 
 
 def load_fsdp_checkpoint(
@@ -352,6 +416,8 @@ def load_fsdp_checkpoint(
     Load a sharded FSDP checkpoint. All ranks must call this together.
     Returns the step number from the checkpoint metadata.
     """
+    validate_fsdp_checkpoint(ckpt_dir, dist.get_world_size())
+
     state = {"model": model, "optimizer": optimizer}
     dcp.load(state, checkpoint_id=str(ckpt_dir))
 
@@ -577,7 +643,9 @@ def train(
     )
     run_dir = ckpt_root / f"run_{timestamp}"
     best_ckpt_dir = run_dir / "best"
+    last_ckpt_dir = run_dir / "last"
     best_loss = float("inf")
+    # When true: skip step_NNNNN archives (disk-heavy). Still write best/ + last/.
     save_best_only: bool = cfg.get("save_best_only", False)
 
     # ── Training loop ─────────────────────────────────────────────────────────
@@ -592,7 +660,14 @@ def train(
             f" world_size={world_size}) ──"
         )
         if save_best_only:
-            print("Checkpoint policy: best-only (no step_* or _final saves)")
+            print(
+                "Checkpoint policy: best/ + single last/ "
+                f"(atomic last.tmp every {cfg.save_interval} steps; no step_* archives)"
+            )
+        else:
+            print(
+                f"Checkpoint policy: best/ + last/ + step_* every {cfg.save_interval}"
+            )
 
     while step < cfg.max_steps:
         try:
@@ -657,14 +732,23 @@ def train(
         if is_master and step % cfg.grad_norm_log_interval == 0:
             print(f"  grad_norm = {grad_norm:.4f}")
 
-        # ── Periodic step checkpoints (optional) ────────────────────────────────
-        # When save_best_only=true (phase3_1B.yaml), skip step_* saves to avoid
-        # filling $SCRATCH — each DCP checkpoint is ~8 GB × 100 steps ≈ 800 GB.
-        if not save_best_only and step % cfg.save_interval == 0:
+        # ── Periodic last/ (+ optional step_* archives) ─────────────────────────
+        # Overwrite a single run_*/last/ every save_interval (atomic last.tmp →
+        # last rename). Never accumulates step history under last/.
+        # save_best_only skips step_NNNNN archives to avoid filling $SCRATCH.
+        if step % cfg.save_interval == 0:
             save_fsdp_checkpoint(
-                model, optimizer, step, loss.item(), cfg,
-                run_dir / f"step_{step:07d}",
+                model, optimizer, step, loss.item(), cfg, last_ckpt_dir,
+                atomic=True,
             )
+            if is_master:
+                print(f"[ckpt] Saved last → {last_ckpt_dir} (step={step})")
+
+            if not save_best_only:
+                save_fsdp_checkpoint(
+                    model, optimizer, step, loss.item(), cfg,
+                    run_dir / f"step_{step:07d}",
+                )
             dist.barrier()
 
         # ── Save-best checkpoint ───────────────────────────────────────────────
@@ -690,17 +774,32 @@ def train(
             save_fsdp_checkpoint(
                 model, optimizer, step, current_loss, cfg, best_ckpt_dir,
             )
+            if is_master:
+                print(
+                    f"[ckpt] Saved best → {best_ckpt_dir} "
+                    f"(step={step}, loss={current_loss:.4f})"
+                )
         dist.barrier()
 
-    # ── Final checkpoint (optional) ───────────────────────────────────────────
+    # ── Final last/ checkpoint ────────────────────────────────────────────────
+    # Overwrite last/ once more so a clean finish is resumable / exportable.
+    save_fsdp_checkpoint(
+        model, optimizer, step, loss.item(), cfg, last_ckpt_dir,
+        atomic=True,
+    )
     if not save_best_only:
         save_fsdp_checkpoint(
             model, optimizer, step, loss.item(), cfg,
             run_dir / f"step_{step:07d}_final",
         )
     if is_master:
-        ckpt_note = f"{run_dir}/best" if save_best_only else str(run_dir)
-        print(f"\nTraining complete. Checkpoints: {ckpt_note}")
+        # Drop any leftover last.tmp from a prior killed write.
+        leftover_tmp = Path(f"{last_ckpt_dir}.tmp")
+        if leftover_tmp.exists():
+            shutil.rmtree(leftover_tmp)
+        print(
+            f"\nTraining complete. Checkpoints: {run_dir}/best  and  {run_dir}/last"
+        )
 
     dist.barrier()
 

@@ -347,5 +347,6 @@ sbatch --nodes=1 --nodelist=gpu028 slurm/train_fsdp_4nodes.sh
 | `RendezvousTimeoutError` at job start | `torchrun` was called without `srun` — only the head node joined. Wrap in `srun --label torchrun … --node_rank=$SLURM_PROCID` (see `hello_2nodes_4gpu.sh`) |
 | `FileNotFoundError: …/src/train_fsdp.py` on multi-node | Submit from `/scratch/$USER/amarel-llm-foundry` (not `$HOME`). `train_fsdp_4nodes.sh` runs a preflight `srun --chdir=$SLURM_SUBMIT_DIR` check before launching. `/scratch` is the same path on `gpu*` and `gpuk*` nodes — no `scache` workaround needed. |
 | `OSError: [Errno 122] Disk quota exceeded` at import | Check scratch on a `gpuk` node: `srun … du -sh /scratch/$USER; mmlsquota --block-size=auto scratch`. If `du` is small but `mmlsquota` > 1 TB (grace expired), quota is stale — email **help@oarc.rutgers.edu**. If `du` is large, delete `checkpoints/run_*` until under 1 TB. |
+| Incomplete DCP / missing `.metadata` on resume | Job killed mid-save. Check `ls -la …/last/.metadata` and `…/best/.metadata`. Resume from the complete one (`--resume …/last` preferred). |
 | `CUDA_VISIBLE_DEVICES` mismatch | Ensure `--nproc_per_node` == `--gres=gpu:N` |
 | `.err` file has `srun: error: PMK_KVS` | Switch `--rdzv_backend` to `env` or `c10d` |

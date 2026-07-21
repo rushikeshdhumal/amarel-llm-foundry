@@ -160,8 +160,14 @@ efficiency = (4-node tok/s) / (1-node tok/s × 4)
 
 ### Resume from a sharded checkpoint
 
+Prefer `last/` (nearest step before a wall-clock kill). Fall back to `best/` if `last/` is incomplete:
+
 ```bash
-sbatch slurm/train_fsdp_4nodes.sh --resume $CHECKPOINT_DIR/run_<timestamp>/step_<N>
+# Verify completeness (.metadata must exist)
+ls -la $CHECKPOINT_DIR/run_<timestamp>/last/.metadata
+
+sbatch slurm/train_fsdp_4nodes.sh --resume $CHECKPOINT_DIR/run_<timestamp>/last
+# or: --resume $CHECKPOINT_DIR/run_<timestamp>/best
 ```
 
 ### Monitor output

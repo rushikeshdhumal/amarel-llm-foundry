@@ -56,8 +56,14 @@ warmup_steps: 5000
 # A full production run would use 200k+ steps.
 max_steps: 50000
 
-# Only write run_<ts>/best/ — skip periodic step_* and _final (saves ~800 GB on scratch).
+# Keep run_<ts>/best/ (lowest loss) and a single overwritten run_<ts>/last/
+# (atomic last.tmp → last every save_interval). No step_NNNNN archives.
+# Steady-state disk ≈ 2× one DCP; briefly 3× while last.tmp is writing.
+# Prefer --resume …/last; fall back to …/best if needed.
 save_best_only: true
+
+# How often to overwrite run_*/last/ (base_config save_interval is 500).
+# save_interval: 500
 
 # torch.compile requires GCC >= 4.9 (stdatomic.h). Confirm RHEL9 GCC version
 # before enabling — run the Phase 0 smoke test with use_compile=true first.

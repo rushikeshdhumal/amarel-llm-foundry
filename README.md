@@ -166,20 +166,24 @@ $SCRATCH/data/tinystories/tokenized/val_meta.yaml
 
 ### Step 1 — Export Phase 3
 
-After Phase 3 FSDP training completes:
+Phase 3 completed at step 42312 (loss 0.5811), 16 DCP shards under `run_20260722_182718/best/`:
 
 ```bash
 sbatch slurm/export_checkpoint.sh \
-  --checkpoint $SCRATCH/checkpoints/run_<phase3_ts>/best
+  --checkpoint $SCRATCH/checkpoints/run_20260722_182718/best
 ```
 
-Output: `$SCRATCH/checkpoints/run_<phase3_ts>/best_export/` with `model.pt` + `config.yaml`.
-
-Find checkpoint paths in Phase 3 SLURM `.out` logs. If training was resumed, use the `run_<ts>` that holds your best DCP checkpoint.
+Output: `$SCRATCH/checkpoints/run_20260722_182718/best_export/` with `model.pt` + `config.yaml`. The checkpoint has 16 shards (`__0_0.distcp` … `__15_0.distcp`), matching the script's default 4 nodes × 4 GPUs — no `--nodes` override needed.
 
 ### Step 2 — Eval + benchmark
 
-Edit `configs/eval_checkpoints.yaml` with your checkpoint paths, then:
+`configs/eval_checkpoints.yaml` already points at all three phases:
+
+| Phase | Path |
+| :--- | :--- |
+| 1 (~124M) | `run_20260619_182306/step_0093000` (no `best/` on this run) |
+| 2 (~350M) | `run_20260628_022929/best` |
+| 3 (~1.3B) | `run_20260722_182718/best_export` (after Step 1 export) |
 
 ```bash
 sbatch slurm/eval.sh
@@ -198,9 +202,9 @@ python -m src.benchmark --config configs/eval_suite.yaml
 ### Step 3 — Archive
 
 ```bash
-cp -r $SCRATCH/checkpoints/run_<phase1_ts>/best ~/checkpoints/phase1_best/
-cp -r $SCRATCH/checkpoints/run_<phase2_ts>/best ~/checkpoints/phase2_best/
-cp -r $SCRATCH/checkpoints/run_<phase3_ts>/best_export ~/checkpoints/phase3_best/  # if exported
+cp -r $SCRATCH/checkpoints/run_20260619_182306/step_0093000 ~/checkpoints/phase1_best/
+cp -r $SCRATCH/checkpoints/run_20260628_022929/best ~/checkpoints/phase2_best/
+cp -r $SCRATCH/checkpoints/run_20260722_182718/best_export ~/checkpoints/phase3_best/
 cp $SCRATCH/benchmark_results/report.md ~/checkpoints/
 ```
 

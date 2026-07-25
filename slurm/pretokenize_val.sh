@@ -5,7 +5,7 @@
 #   sbatch slurm/pretokenize_val.sh
 
 #SBATCH --job-name=pretokenize_val
-#SBATCH --partition=gpu-redhat
+#SBATCH --partition=main-redhat
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
 #SBATCH --cpus-per-task=4

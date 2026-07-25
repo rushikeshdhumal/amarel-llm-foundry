@@ -2,12 +2,14 @@
 # $SCRATCH is expanded at runtime.
 
 checkpoints:
+  # Phase 1: no best/ dir on this run — using the lowest-loss step_* checkpoint.
   - name: phase1_124M
-    path: /scratch/$USER/checkpoints/run_<phase1_ts>/best
+    path: /scratch/$USER/checkpoints/run_20260619_182306/step_0093000
 
   - name: phase2_350M
-    path: /scratch/$USER/checkpoints/run_<phase2_ts>/best
+    path: /scratch/$USER/checkpoints/run_20260628_022929/best
 
-  # After FSDP export (Phase 3 training complete):
+  # Phase 3 training complete (step 42312, loss 0.5811) — export before use:
+  #   sbatch slurm/export_checkpoint.sh --checkpoint $SCRATCH/checkpoints/run_20260722_182718/best
   - name: phase3_1B
-    path: /scratch/$USER/checkpoints/run_<phase3_ts>/best_export
+    path: /scratch/$USER/checkpoints/run_20260722_182718/best_export

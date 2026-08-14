@@ -38,6 +38,7 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper,
 )
 
+from src.generate import strip_wrapper_prefixes
 from src.model import GPT, GPTConfig, TransformerBlock
 from src.train_fsdp import (
     build_optimizer,
@@ -45,6 +46,71 @@ from src.train_fsdp import (
     load_fsdp_checkpoint,
     setup_distributed,
 )
+
+
+def unwrap_activation_checkpointing(module: torch.nn.Module) -> None:
+    """
+    Replace CheckpointWrapper modules with their inner module.
+
+    apply_activation_checkpointing is required so dcp.load() sees the same tree
+    as training, but FULL_STATE_DICT gather through those wrappers can produce
+    correctly shaped tensors with wrong values. Unwrap after load, before gather.
+    """
+    if isinstance(module, FSDP):
+        inner = module._fsdp_wrapped_module
+        wrapped = getattr(inner, "_checkpoint_wrapped_module", None)
+        if wrapped is not None:
+            module._fsdp_wrapped_module = wrapped
+            unwrap_activation_checkpointing(wrapped)
+        else:
+            unwrap_activation_checkpointing(inner)
+        return
+
+    if isinstance(module, (torch.nn.ModuleList, torch.nn.Sequential)):
+        for idx, child in enumerate(list(module)):
+            wrapped = getattr(child, "_checkpoint_wrapped_module", None)
+            if wrapped is not None:
+                module[idx] = wrapped
+                unwrap_activation_checkpointing(wrapped)
+            else:
+                unwrap_activation_checkpointing(child)
+        return
+
+    if isinstance(module, torch.nn.ModuleDict):
+        for key, child in list(module.items()):
+            wrapped = getattr(child, "_checkpoint_wrapped_module", None)
+            if wrapped is not None:
+                module[key] = wrapped
+                unwrap_activation_checkpointing(wrapped)
+            else:
+                unwrap_activation_checkpointing(child)
+        return
+
+    for name, child in list(module.named_children()):
+        wrapped = getattr(child, "_checkpoint_wrapped_module", None)
+        if wrapped is not None:
+            setattr(module, name, wrapped)
+            unwrap_activation_checkpointing(wrapped)
+        else:
+            unwrap_activation_checkpointing(child)
+
+
+def to_plain_gpt_state_dict(raw_state: dict, cfg: OmegaConf) -> tuple[dict, int]:
+    """Strip wrapper prefixes and reload into a plain GPT so keys match generate.py."""
+    cleaned = strip_wrapper_prefixes(raw_state)
+    ref = GPT(GPTConfig.from_omegaconf(cfg))
+    incompatible = ref.load_state_dict(cleaned, strict=False)
+    missing_params = [k for k in incompatible.missing_keys if not k.endswith(".mask")]
+    if missing_params:
+        raise RuntimeError(
+            "Exported state_dict is missing GPT parameter keys "
+            f"(showing up to 8): {missing_params[:8]}"
+        )
+    ref.lm_head.weight = ref.tok_emb.weight
+    n_params = ref.count_parameters()
+    plain = {k: v.detach().cpu().contiguous() for k, v in ref.state_dict().items()}
+    return plain, n_params
+
 
 def build_fsdp_model(cfg: OmegaConf, device: torch.device, world_size: int) -> tuple[FSDP, torch.optim.Optimizer]:
     """Rebuild the FSDP-wrapped model with the same policy as train_fsdp.py."""
@@ -122,6 +188,9 @@ def export_checkpoint(
     load_fsdp_checkpoint(model, optimizer, ckpt_dir, device)
     dist.barrier()
 
+    unwrap_activation_checkpointing(model)
+    dist.barrier()
+
     save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
     with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, save_policy):
         full_state = model.state_dict()
@@ -130,18 +199,20 @@ def export_checkpoint(
         export_dir = Path(f"{ckpt_dir}_export")
         export_dir.mkdir(parents=True, exist_ok=True)
 
+        plain_state, unique_params = to_plain_gpt_state_dict(full_state, cfg)
         weights_path = export_dir / "model.pt"
-        torch.save(full_state, weights_path)
+        torch.save(plain_state, weights_path)
 
         save_cfg = OmegaConf.to_container(cfg, resolve=True)
         save_cfg["_step"] = step
         save_cfg["_loss"] = loss
         OmegaConf.save(OmegaConf.create(save_cfg), export_dir / "config.yaml")
 
-        n_params = sum(p.numel() for p in full_state.values())
-        print(f"[export] Wrote {n_params / 1e9:.3f}B params → {weights_path}")
+        sample_keys = list(plain_state.keys())[:5]
+        print(f"[export] State dict keys (first 5): {sample_keys}")
+        print(f"[export] Wrote {unique_params / 1e9:.3f}B unique params → {weights_path}")
         print(f"[export] Config → {export_dir / 'config.yaml'}")
-        print(f"[export] Done. Use this directory with generate.py and eval.py.")
+        print("[export] Done. Use this directory with generate.py and eval.py.")
 
     dist.barrier()
 

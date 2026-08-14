@@ -17,6 +17,7 @@ from pathlib import Path
 import numpy as np
 import tiktoken
 import torch
+import torch.nn.functional as F
 from omegaconf import OmegaConf
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -80,10 +81,14 @@ def evaluate_hf_gpt2_on_val(
         input_ids = torch.tensor(xs, dtype=torch.long, device=device)
         labels = torch.tensor(ys, dtype=torch.long, device=device)
 
-        outputs = model(input_ids=input_ids, labels=labels)
-        loss = outputs.loss
-        if loss is None:
-            raise RuntimeError(f"{model_name} returned no loss.")
+        # Compute CE ourselves with the same already-shifted (x, y) windows as
+        # eval.py. Hugging Face GPT-2 shifts labels internally, so passing y as
+        # `labels=` would double-shift and inflate perplexity.
+        logits = model(input_ids=input_ids).logits
+        loss = F.cross_entropy(
+            logits.view(-1, logits.size(-1)),
+            labels.view(-1),
+        )
 
         total_loss += loss.item() * len(batch_starts)
         total_windows += len(batch_starts)

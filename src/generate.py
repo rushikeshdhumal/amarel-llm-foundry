@@ -58,6 +58,31 @@ from src.model import GPT, GPTConfig
 
 # ── Checkpoint loading ─────────────────────────────────────────────────────────
 
+WRAPPER_KEY_PREFIXES = (
+    "_checkpoint_wrapped_module.",
+    "_fsdp_wrapped_module.",
+    "_orig_mod.",
+)
+
+
+def strip_wrapper_prefixes(state_dict: dict) -> dict:
+    """Remove FSDP / activation-checkpoint / DDP wrapper prefixes from keys."""
+    cleaned: dict = {}
+    for key, value in state_dict.items():
+        new_key = key
+        changed = True
+        while changed:
+            changed = False
+            for prefix in WRAPPER_KEY_PREFIXES:
+                if prefix in new_key:
+                    new_key = new_key.replace(prefix, "")
+                    changed = True
+        if new_key.startswith("module."):
+            new_key = new_key[len("module.") :]
+        cleaned[new_key] = value
+    return cleaned
+
+
 def load_model_from_checkpoint(checkpoint_dir: Path, device: torch.device) -> tuple[GPT, dict]:
     """
     Reconstruct the GPT model from a checkpoint directory and load weights.
@@ -94,7 +119,22 @@ def load_model_from_checkpoint(checkpoint_dir: Path, device: torch.device) -> tu
     # map_location=device ensures tensors land on the right device even if
     # the checkpoint was saved on a different GPU index.
     state_dict = torch.load(weights_path, map_location=device, weights_only=True)
-    model.load_state_dict(state_dict)
+    if not isinstance(state_dict, dict):
+        raise TypeError(f"Expected a state_dict dict in {weights_path}, got {type(state_dict)}")
+    state_dict = strip_wrapper_prefixes(state_dict)
+    incompatible = model.load_state_dict(state_dict, strict=False)
+    missing_params = [
+        k for k in incompatible.missing_keys
+        if not k.endswith(".mask")
+    ]
+    if missing_params:
+        raise RuntimeError(
+            f"Checkpoint {checkpoint_dir} is missing {len(missing_params)} parameter keys "
+            f"(e.g. {missing_params[:8]}). Re-export FSDP checkpoints with "
+            "scripts/export_fsdp_checkpoint.py."
+        )
+    # Restore weight tying in case the export stored tok_emb / lm_head separately.
+    model.lm_head.weight = model.tok_emb.weight
 
     # eval() disables dropout — essential for deterministic inference.
     # During training dropout randomly zeros activations; at inference we

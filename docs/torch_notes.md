@@ -267,3 +267,13 @@ if save_best_t.item():
 ```
 
 **Rule of thumb:** Any code path that contains a collective (`dcp.save/load`, `dist.barrier`, `dist.all_reduce`, `dist.broadcast`) must be reached by ALL ranks unconditionally, or the condition must be synchronised via a broadcast first. If rank divergence is possible (per-rank loss, filesystem checks, is_master guards), synchronise before branching.
+
+---
+
+## 12. FSDP export: unwrap activation checkpointing before FULL_STATE_DICT
+
+**What happened:** Phase 3 DCP export produced a `model.pt` that loaded without error (keys and shapes matched) but eval perplexity was ~1800 vs a train loss of 0.58.
+
+**Why:** Training applies `apply_activation_checkpointing` *after* FSDP wrapping. `dcp.load()` needs that same tree. `FSDP.state_dict()` with `FULL_STATE_DICT` then gathers through `CheckpointWrapper` modules. The result can be full-sized tensors under the right names whose *values* were not correctly all-gathered — so `load_state_dict` succeeds and the model is still garbage.
+
+**Fix:** After `dcp.load()`, unwrap every `CheckpointWrapper` (`_checkpoint_wrapped_module`) on all ranks, then gather. Reload the gathered dict into a plain `GPT` and save *that* `state_dict()` so `generate.py` / `eval.py` see the same keys as Phase 1–2 checkpoints.

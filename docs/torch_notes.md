@@ -270,10 +270,13 @@ if save_best_t.item():
 
 ---
 
-## 12. FSDP export: unwrap activation checkpointing before FULL_STATE_DICT
+## 12. FSDP export: gather with `summon_full_params`, do not unwrap wrappers
 
-**What happened:** Phase 3 DCP export produced a `model.pt` that loaded without error (keys and shapes matched) but eval perplexity was ~1800 vs a train loss of 0.58.
+**What happened:** Phase 3 DCP export produced a `model.pt` that loaded without error (keys and shapes matched) but eval perplexity was ~1800 vs a train loss of 0.58. A follow-up export that unwrapped `CheckpointWrapper` modules before `FULL_STATE_DICT` hung until the SLURM time limit (`RendezvousTimeoutError`, then `CANCELLED DUE TO TIME LIMIT`).
 
-**Why:** Training applies `apply_activation_checkpointing` *after* FSDP wrapping. `dcp.load()` needs that same tree. `FSDP.state_dict()` with `FULL_STATE_DICT` then gathers through `CheckpointWrapper` modules. The result can be full-sized tensors under the right names whose *values* were not correctly all-gathered — so `load_state_dict` succeeds and the model is still garbage.
+**Why:**
+- Training applies `apply_activation_checkpointing` *after* FSDP wrapping. `dcp.load()` needs that same tree.
+- `FSDP.state_dict()` with `FULL_STATE_DICT` walks through `CheckpointWrapper` and can emit full-sized tensors with the right names but wrong values.
+- Mutating `_fsdp_wrapped_module` / replacing wrappers after load invalidates FSDP handles, so the next collective deadlocks.
 
-**Fix:** After `dcp.load()`, unwrap every `CheckpointWrapper` (`_checkpoint_wrapped_module`) on all ranks, then gather. Reload the gathered dict into a plain `GPT` and save *that* `state_dict()` so `generate.py` / `eval.py` see the same keys as Phase 1–2 checkpoints.
+**Fix:** Leave the module tree untouched. After `dcp.load()`, gather with `FSDP.summon_full_params(..., rank0_only=True, offload_to_cpu=True)`, strip wrapper prefixes from keys, and `torch.save` that dict. Do not construct a second 1.3B `GPT` on rank 0 just to re-save.

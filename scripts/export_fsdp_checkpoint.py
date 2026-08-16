@@ -2,7 +2,8 @@
 export_fsdp_checkpoint.py — Gather FSDP DCP shards into a single model.pt for inference.
 
 All ranks must participate in dcp.load(); rank 0 writes model.pt + config.yaml to
-<checkpoint_dir>_export/ using FullStateDictConfig(offload_to_cpu=True, rank0_only=True).
+<checkpoint_dir>_export/. Parameters are gathered with FSDP.summon_full_params
+(not FULL_STATE_DICT through activation-checkpoint wrappers).
 
 Launch with the same world_size and node layout as the training job that wrote the
 checkpoint (default Phase 3: 4 nodes × 4 GPUs = 16).
@@ -21,16 +22,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import torch
 import torch.distributed as dist
-import torch.distributed.checkpoint as dcp
 import yaml
 from omegaconf import OmegaConf
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.distributed.fsdp import (
-    FullStateDictConfig,
-    MixedPrecision,
-    ShardingStrategy,
-    StateDictType,
-)
+from torch.distributed.fsdp import MixedPrecision, ShardingStrategy
 from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     CheckpointImpl,
@@ -39,77 +34,13 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 )
 
 from src.generate import strip_wrapper_prefixes
-from src.model import GPT, GPTConfig, TransformerBlock
+from src.model import GPTConfig, TransformerBlock
 from src.train_fsdp import (
     build_optimizer,
     cleanup_distributed,
     load_fsdp_checkpoint,
     setup_distributed,
 )
-
-
-def unwrap_activation_checkpointing(module: torch.nn.Module) -> None:
-    """
-    Replace CheckpointWrapper modules with their inner module.
-
-    apply_activation_checkpointing is required so dcp.load() sees the same tree
-    as training, but FULL_STATE_DICT gather through those wrappers can produce
-    correctly shaped tensors with wrong values. Unwrap after load, before gather.
-    """
-    if isinstance(module, FSDP):
-        inner = module._fsdp_wrapped_module
-        wrapped = getattr(inner, "_checkpoint_wrapped_module", None)
-        if wrapped is not None:
-            module._fsdp_wrapped_module = wrapped
-            unwrap_activation_checkpointing(wrapped)
-        else:
-            unwrap_activation_checkpointing(inner)
-        return
-
-    if isinstance(module, (torch.nn.ModuleList, torch.nn.Sequential)):
-        for idx, child in enumerate(list(module)):
-            wrapped = getattr(child, "_checkpoint_wrapped_module", None)
-            if wrapped is not None:
-                module[idx] = wrapped
-                unwrap_activation_checkpointing(wrapped)
-            else:
-                unwrap_activation_checkpointing(child)
-        return
-
-    if isinstance(module, torch.nn.ModuleDict):
-        for key, child in list(module.items()):
-            wrapped = getattr(child, "_checkpoint_wrapped_module", None)
-            if wrapped is not None:
-                module[key] = wrapped
-                unwrap_activation_checkpointing(wrapped)
-            else:
-                unwrap_activation_checkpointing(child)
-        return
-
-    for name, child in list(module.named_children()):
-        wrapped = getattr(child, "_checkpoint_wrapped_module", None)
-        if wrapped is not None:
-            setattr(module, name, wrapped)
-            unwrap_activation_checkpointing(wrapped)
-        else:
-            unwrap_activation_checkpointing(child)
-
-
-def to_plain_gpt_state_dict(raw_state: dict, cfg: OmegaConf) -> tuple[dict, int]:
-    """Strip wrapper prefixes and reload into a plain GPT so keys match generate.py."""
-    cleaned = strip_wrapper_prefixes(raw_state)
-    ref = GPT(GPTConfig.from_omegaconf(cfg))
-    incompatible = ref.load_state_dict(cleaned, strict=False)
-    missing_params = [k for k in incompatible.missing_keys if not k.endswith(".mask")]
-    if missing_params:
-        raise RuntimeError(
-            "Exported state_dict is missing GPT parameter keys "
-            f"(showing up to 8): {missing_params[:8]}"
-        )
-    ref.lm_head.weight = ref.tok_emb.weight
-    n_params = ref.count_parameters()
-    plain = {k: v.detach().cpu().contiguous() for k, v in ref.state_dict().items()}
-    return plain, n_params
 
 
 def build_fsdp_model(cfg: OmegaConf, device: torch.device, world_size: int) -> tuple[FSDP, torch.optim.Optimizer]:
@@ -169,6 +100,44 @@ def load_checkpoint_config(ckpt_dir: Path) -> tuple[OmegaConf, int, float]:
     return cfg, step, loss
 
 
+def count_unique_params(state: dict) -> int:
+    """Count parameter elements, skipping reconstructed buffers and tied lm_head."""
+    skip_lm_head = "tok_emb.weight" in state and "lm_head.weight" in state
+    total = 0
+    for key, tensor in state.items():
+        if key.endswith(".mask"):
+            continue
+        if skip_lm_head and key == "lm_head.weight":
+            continue
+        total += tensor.numel()
+    return total
+
+
+def gather_full_state(model: FSDP, is_master: bool) -> dict:
+    """
+    All-gather full parameters without mutating the FSDP module tree.
+
+    summon_full_params talks to FSDP handles directly. That avoids FULL_STATE_DICT
+    walking through CheckpointWrapper (wrong values) and avoids unwrapping those
+    wrappers (NCCL deadlock).
+    """
+    full_state: dict = {}
+    with FSDP.summon_full_params(
+        model,
+        recurse=True,
+        writeback=False,
+        rank0_only=True,
+        offload_to_cpu=True,
+        with_grads=False,
+    ):
+        if is_master:
+            for name, param in model.named_parameters():
+                full_state[name] = param.detach().cpu().contiguous().clone()
+            for name, buf in model.named_buffers():
+                full_state[name] = buf.detach().cpu().contiguous().clone()
+    return full_state
+
+
 def export_checkpoint(
     ckpt_dir: Path,
     rank: int,
@@ -187,20 +156,33 @@ def export_checkpoint(
 
     load_fsdp_checkpoint(model, optimizer, ckpt_dir, device)
     dist.barrier()
+    if is_master:
+        print("[export] DCP load complete. Gathering full parameters...")
 
-    unwrap_activation_checkpointing(model)
+    full_state = gather_full_state(model, is_master)
     dist.barrier()
-
-    save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
-    with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, save_policy):
-        full_state = model.state_dict()
 
     if is_master:
         export_dir = Path(f"{ckpt_dir}_export")
         export_dir.mkdir(parents=True, exist_ok=True)
 
-        plain_state, unique_params = to_plain_gpt_state_dict(full_state, cfg)
+        plain_state = strip_wrapper_prefixes(full_state)
+        required = [
+            "tok_emb.weight",
+            "pos_emb.weight",
+            "ln_f.weight",
+            "blocks.0.ln1.weight",
+            "lm_head.weight",
+        ]
+        missing = [key for key in required if key not in plain_state]
+        if missing:
+            sample = list(plain_state.keys())[:12]
+            raise RuntimeError(
+                f"Gathered state_dict missing {missing}. Sample keys: {sample}"
+            )
+
         weights_path = export_dir / "model.pt"
+        print(f"[export] Writing {weights_path} ...")
         torch.save(plain_state, weights_path)
 
         save_cfg = OmegaConf.to_container(cfg, resolve=True)
@@ -208,13 +190,15 @@ def export_checkpoint(
         save_cfg["_loss"] = loss
         OmegaConf.save(OmegaConf.create(save_cfg), export_dir / "config.yaml")
 
-        sample_keys = list(plain_state.keys())[:5]
-        print(f"[export] State dict keys (first 5): {sample_keys}")
+        unique_params = count_unique_params(plain_state)
+        print(f"[export] State dict keys (first 5): {list(plain_state.keys())[:5]}")
         print(f"[export] Wrote {unique_params / 1e9:.3f}B unique params → {weights_path}")
         print(f"[export] Config → {export_dir / 'config.yaml'}")
         print("[export] Done. Use this directory with generate.py and eval.py.")
 
     dist.barrier()
+    if is_master:
+        print("[export] All ranks finished.")
 
 
 def parse_args() -> argparse.Namespace:

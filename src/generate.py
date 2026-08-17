@@ -127,10 +127,30 @@ def load_model_from_checkpoint(checkpoint_dir: Path, device: torch.device) -> tu
     if not isinstance(state_dict, dict):
         raise TypeError(f"Expected a state_dict dict in {weights_path}, got {type(state_dict)}")
     state_dict = strip_wrapper_prefixes(state_dict)
+
+    # GPT ties lm_head to tok_emb, but FSDP does not preserve that: with
+    # use_orig_params=False the shared tensor is never marked as flattened, so
+    # tok_emb and lm_head end up in separate FSDP units and train as two
+    # independent matrices. Phase 3 checkpoints therefore carry a real,
+    # separately trained head (Phase 1/2 checkpoints carry two equal copies).
+    #
+    # Untie BEFORE loading when the checkpoint's two matrices differ. On a tied
+    # model both keys address the same storage, so load_state_dict would copy
+    # them one after the other and let the last one silently win.
+    checkpoint_head = state_dict.get("lm_head.weight")
+    checkpoint_tok = state_dict.get("tok_emb.weight")
+    head_is_tied = checkpoint_head is None or (
+        checkpoint_tok is not None and torch.equal(checkpoint_head, checkpoint_tok)
+    )
+    if not head_is_tied:
+        model.lm_head.weight = torch.nn.Parameter(torch.empty_like(checkpoint_head))
+
     incompatible = model.load_state_dict(state_dict, strict=False)
     missing_params = [
         k for k in incompatible.missing_keys
         if not k.endswith(".mask")
+        # A tied checkpoint may omit lm_head.weight; tok_emb.weight supplies it.
+        and not (head_is_tied and k == "lm_head.weight")
     ]
     if missing_params:
         raise RuntimeError(
@@ -138,8 +158,8 @@ def load_model_from_checkpoint(checkpoint_dir: Path, device: torch.device) -> tu
             f"(e.g. {missing_params[:8]}). Re-export FSDP checkpoints with "
             "scripts/export_fsdp_checkpoint.py."
         )
-    # Restore weight tying in case the export stored tok_emb / lm_head separately.
-    model.lm_head.weight = model.tok_emb.weight
+    if head_is_tied:
+        model.lm_head.weight = model.tok_emb.weight
 
     # eval() disables dropout — essential for deterministic inference.
     # During training dropout randomly zeros activations; at inference we
@@ -147,10 +167,11 @@ def load_model_from_checkpoint(checkpoint_dir: Path, device: torch.device) -> tu
     model.eval()
 
     loss_str = f", loss={saved_loss:.4f}" if saved_loss is not None else ""
+    tying = "tied lm_head" if head_is_tied else "untied lm_head (FSDP)"
     print(f"[generate] Loaded checkpoint: {checkpoint_dir}")
     print(f"           step={saved_step}{loss_str}")
     print(f"           architecture: {model_cfg.n_layer}L / {model_cfg.n_head}H / "
-          f"{model_cfg.n_embd}D  ({model.count_parameters()/1e6:.1f}M params)")
+          f"{model_cfg.n_embd}D  ({model.count_parameters()/1e6:.1f}M params, {tying})")
 
     return model, OmegaConf.to_container(cfg, resolve=True)
 

@@ -4,15 +4,22 @@
 
 # ── Model architecture ──────────────────────────────────────────────────────────
 # n_layer=24, n_head=16, n_embd=2048:
-#   Token embedding:     50257 × 2048           ≈  103M  (weight-tied with lm_head)
+#   Token embedding:     50257 × 2048           ≈  103M
 #   Positional:           1024 × 2048           ≈    2M
 #   Per TransformerBlock:
 #     Attention (Q,K,V,O): 4 × 2048²            ≈ 16.8M
 #     MLP (fc + proj):     8 × 2048²            ≈ 33.6M
 #     subtotal                                   ≈ 50.3M
 #   24 blocks:           24 × 50.3M             ≈ 1,208M
-#   Final LayerNorm + lm_head (tied):            ≈   0.1M
-#   Total                                        ≈ 1,313M  (~1.3B)
+#   Final LayerNorm                              ≈   0.1M
+#   Subtotal, lm_head tied to tok_emb            ≈ 1,313M  (~1.3B)
+#   lm_head, untied by FSDP (see train_fsdp.py) ≈  103M
+#   Total as actually trained                    ≈ 1,416M  (~1.4B)
+#
+# The tie GPT sets up in model.py does not survive FSDP's auto-wrap, so this
+# phase really trains 1.42B parameters. Everything below is sized off the tied
+# 1,313M figure; the extra embedding table adds ≈ 51 MB/rank of shard and
+# ≈ 51 MB/rank of optimizer state, which the budget absorbs.
 #
 # WHY these choices:
 #   n_layer=24: same depth as Phase 2; architectural step is doubling width.

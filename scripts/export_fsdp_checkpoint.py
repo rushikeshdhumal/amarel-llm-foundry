@@ -116,8 +116,16 @@ def load_checkpoint_config(ckpt_dir: Path) -> tuple[OmegaConf, int, float]:
 
 
 def count_unique_params(state: dict) -> int:
-    """Count parameter elements, skipping reconstructed buffers and tied lm_head."""
-    skip_lm_head = "tok_emb.weight" in state and "lm_head.weight" in state
+    """
+    Count parameter elements, skipping reconstructed buffers.
+
+    lm_head.weight only duplicates tok_emb.weight when the two are actually
+    equal. FSDP trains them as separate matrices, so assuming they are tied
+    would under-report the real parameter count by one embedding table.
+    """
+    tok = state.get("tok_emb.weight")
+    head = state.get("lm_head.weight")
+    skip_lm_head = tok is not None and head is not None and torch.equal(tok, head)
     total = 0
     for key, tensor in state.items():
         if key.endswith(".mask"):
@@ -216,10 +224,17 @@ def export_checkpoint(
             )
 
         tok = plain_state["tok_emb.weight"].float()
+        head = plain_state["lm_head.weight"].float()
         print(
             f"[export] tok_emb.weight shape={tuple(tok.shape)} "
             f"mean={tok.mean().item():.5f} std={tok.std().item():.5f} "
             f"(init is std≈0.02; a trained embedding is typically larger)"
+        )
+        print(
+            f"[export] lm_head.weight std={head.std().item():.5f} "
+            f"max|lm_head-tok_emb|={(head - tok).abs().max().item():.5f} "
+            f"tied={torch.equal(head, tok)} "
+            "(FSDP trains an untied head — generate.py must not re-tie it)"
         )
 
         weights_path = export_dir / "model.pt"

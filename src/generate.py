@@ -65,21 +65,26 @@ WRAPPER_KEY_PREFIXES = (
 )
 
 
+def canonicalize_state_dict_key(key: str) -> str:
+    """Remove FSDP / activation-checkpoint / DDP wrapper prefixes from one key."""
+    new_key = key
+    changed = True
+    while changed:
+        changed = False
+        for prefix in WRAPPER_KEY_PREFIXES:
+            if prefix in new_key:
+                new_key = new_key.replace(prefix, "")
+                changed = True
+    if new_key.startswith("module."):
+        new_key = new_key[len("module.") :]
+    return new_key
+
+
 def strip_wrapper_prefixes(state_dict: dict) -> dict:
     """Remove FSDP / activation-checkpoint / DDP wrapper prefixes from keys."""
     cleaned: dict = {}
     for key, value in state_dict.items():
-        new_key = key
-        changed = True
-        while changed:
-            changed = False
-            for prefix in WRAPPER_KEY_PREFIXES:
-                if prefix in new_key:
-                    new_key = new_key.replace(prefix, "")
-                    changed = True
-        if new_key.startswith("module."):
-            new_key = new_key[len("module.") :]
-        cleaned[new_key] = value
+        cleaned[canonicalize_state_dict_key(key)] = value
     return cleaned
 
 

@@ -34,7 +34,7 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
 )
 
 from src.generate import strip_wrapper_prefixes
-from src.model import GPTConfig, TransformerBlock
+from src.model import GPT, GPTConfig, TransformerBlock
 from src.train_fsdp import (
     build_optimizer,
     cleanup_distributed,

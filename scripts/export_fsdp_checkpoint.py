@@ -2,8 +2,12 @@
 export_fsdp_checkpoint.py — Gather FSDP DCP shards into a single model.pt for inference.
 
 All ranks must participate in dcp.load(); rank 0 writes model.pt + config.yaml to
-<checkpoint_dir>_export/. Parameters are gathered with FSDP.summon_full_params
-(not FULL_STATE_DICT through activation-checkpoint wrappers).
+<checkpoint_dir>_export/.
+
+Export wraps FSDP in fp32 (no MixedPrecision). Training's fp16 policy makes
+summon/FULL_STATE_DICT return compute-dtype copies instead of the fp32 master
+weights, which evals as ~random (val loss 7.5 vs train 0.58). DCP shards are
+fp32; load them into an fp32 FSDP tree, then gather with get_model_state_dict.
 
 Launch with the same world_size and node layout as the training job that wrote the
 checkpoint (default Phase 3: 4 nodes × 4 GPUs = 16).
@@ -25,7 +29,7 @@ import torch.distributed as dist
 import yaml
 from omegaconf import OmegaConf
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
-from torch.distributed.fsdp import MixedPrecision, ShardingStrategy
+from torch.distributed.fsdp import ShardingStrategy
 from torch.distributed.fsdp.wrap import size_based_auto_wrap_policy
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     CheckpointImpl,
@@ -33,7 +37,7 @@ from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
     checkpoint_wrapper,
 )
 
-from src.generate import strip_wrapper_prefixes
+from src.generate import canonicalize_state_dict_key
 from src.model import GPT, GPTConfig, TransformerBlock
 from src.train_fsdp import (
     build_optimizer,
@@ -43,22 +47,33 @@ from src.train_fsdp import (
 )
 
 
+def log_local_param_stats(model: torch.nn.Module, tag: str, rank: int) -> None:
+    """Print a few local parameter tensors so we can see if dcp.load changed them."""
+    printed = 0
+    for name, param in model.named_parameters():
+        if param.numel() == 0:
+            continue
+        tensor = param.detach().float()
+        print(
+            f"[export][rank {rank}] {tag} {name}: "
+            f"shape={tuple(param.shape)} dtype={param.dtype} "
+            f"mean={tensor.mean().item():.5f} std={tensor.std().item():.5f}"
+        )
+        printed += 1
+        if printed >= 3:
+            return
+
+
 def build_fsdp_model(cfg: OmegaConf, device: torch.device, world_size: int) -> tuple[FSDP, torch.optim.Optimizer]:
-    """Rebuild the FSDP-wrapped model with the same policy as train_fsdp.py."""
+    """Rebuild FSDP with the same wrap/shard policy as training, but fp32 params."""
     model_cfg = GPTConfig.from_omegaconf(cfg)
     model = GPT(model_cfg)
 
-    mp_policy = MixedPrecision(
-        param_dtype=torch.float16,
-        reduce_dtype=torch.float16,
-        buffer_dtype=torch.float16,
-    )
     wrap_policy = partial(size_based_auto_wrap_policy, min_num_params=100_000)
 
     model = FSDP(
         model,
         auto_wrap_policy=wrap_policy,
-        mixed_precision=mp_policy,
         sharding_strategy=ShardingStrategy.FULL_SHARD,
         device_id=device,
     )
@@ -113,29 +128,41 @@ def count_unique_params(state: dict) -> int:
     return total
 
 
-def gather_full_state(model: FSDP, is_master: bool) -> dict:
+def collapse_wrapper_keys(raw_state: dict, is_master: bool) -> dict:
     """
-    All-gather full parameters without mutating the FSDP module tree.
+    Strip wrapper prefixes. If several raw keys collapse to the same name,
+    keep the largest tensor (full param over a shard / stale view).
+    """
+    grouped: dict[str, list[tuple[str, torch.Tensor]]] = {}
+    for key, value in raw_state.items():
+        grouped.setdefault(canonicalize_state_dict_key(key), []).append((key, value))
 
-    summon_full_params talks to FSDP handles directly. That avoids FULL_STATE_DICT
-    walking through CheckpointWrapper (wrong values) and avoids unwrapping those
-    wrappers (NCCL deadlock).
+    collapsed: dict = {}
+    for canon, items in grouped.items():
+        if len(items) > 1 and is_master:
+            shapes = [(src, tuple(tensor.shape)) for src, tensor in items]
+            print(f"[export] Key collision for {canon}: {shapes}")
+        items_sorted = sorted(items, key=lambda kv: kv[1].numel(), reverse=True)
+        collapsed[canon] = items_sorted[0][1].detach().cpu().contiguous().clone()
+    return collapsed
+
+
+def gather_full_state(model: FSDP) -> dict:
     """
-    full_state: dict = {}
-    with FSDP.summon_full_params(
+    All-gather a full state dict without mutating the FSDP module tree.
+
+    get_model_state_dict(full_state_dict=True) is the PyTorch 2.x API for a
+    plain (unwrapped) GPT state dict. All ranks must call it.
+    """
+    from torch.distributed.checkpoint.state_dict import (
+        StateDictOptions,
+        get_model_state_dict,
+    )
+
+    return get_model_state_dict(
         model,
-        recurse=True,
-        writeback=False,
-        rank0_only=True,
-        offload_to_cpu=True,
-        with_grads=False,
-    ):
-        if is_master:
-            for name, param in model.named_parameters():
-                full_state[name] = param.detach().cpu().contiguous().clone()
-            for name, buf in model.named_buffers():
-                full_state[name] = buf.detach().cpu().contiguous().clone()
-    return full_state
+        options=StateDictOptions(full_state_dict=True, cpu_offload=True),
+    )
 
 
 def export_checkpoint(
@@ -153,20 +180,27 @@ def export_checkpoint(
 
     if is_master:
         print(f"[export] Loading DCP checkpoint from {ckpt_dir} (step={step}, loss={loss:.4f})")
+        print("[export] FSDP wrap is fp32 (no MixedPrecision) so gather uses master weights.")
 
+    log_local_param_stats(model, "before_load", rank)
+    dist.barrier()
     load_fsdp_checkpoint(model, optimizer, ckpt_dir, device)
+    dist.barrier()
+    log_local_param_stats(model, "after_load", rank)
     dist.barrier()
     if is_master:
         print("[export] DCP load complete. Gathering full parameters...")
 
-    full_state = gather_full_state(model, is_master)
+    full_state = gather_full_state(model)
     dist.barrier()
 
     if is_master:
         export_dir = Path(f"{ckpt_dir}_export")
         export_dir.mkdir(parents=True, exist_ok=True)
 
-        plain_state = strip_wrapper_prefixes(full_state)
+        print(f"[export] Raw gathered keys (first 12): {list(full_state.keys())[:12]}")
+        print(f"[export] Raw gathered key count: {len(full_state)}")
+        plain_state = collapse_wrapper_keys(full_state, is_master=True)
         required = [
             "tok_emb.weight",
             "pos_emb.weight",
@@ -180,6 +214,13 @@ def export_checkpoint(
             raise RuntimeError(
                 f"Gathered state_dict missing {missing}. Sample keys: {sample}"
             )
+
+        tok = plain_state["tok_emb.weight"].float()
+        print(
+            f"[export] tok_emb.weight shape={tuple(tok.shape)} "
+            f"mean={tok.mean().item():.5f} std={tok.std().item():.5f} "
+            f"(init is std≈0.02; a trained embedding is typically larger)"
+        )
 
         weights_path = export_dir / "model.pt"
         print(f"[export] Writing {weights_path} ...")

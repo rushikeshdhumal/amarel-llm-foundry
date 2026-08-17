@@ -450,9 +450,20 @@ def train(
     )
 
     # ── FSDP auto-wrap policy ─────────────────────────────────────────────────
-    # min_num_params=100_000 causes FSDP to wrap every TransformerBlock (each
-    # has ~50M params) as its own FSDP unit. Embedding and LM head layers are
-    # smaller and remain in the root FSDP module.
+    # min_num_params=100_000 causes FSDP to wrap every submodule above that size
+    # as its own FSDP unit: the per-block attention and MLP projections, plus
+    # tok_emb and lm_head (~103M params each at n_embd=2048). Only the layer
+    # norms are small enough to stay in the root unit.
+    #
+    # BREAKS WEIGHT TYING: GPT ties lm_head.weight to tok_emb.weight, but with
+    # use_orig_params=False FSDP never marks the shared tensor as flattened
+    # (_flat_param.py only does so when use_orig_params=True). tok_emb is
+    # wrapped first, and lm_head is then flattened into a second, independent
+    # FlatParameter. Both halves shard and sync correctly, so training is sound
+    # — but the model is really vocab_size × n_embd params larger than the tied
+    # count, and checkpoints hold two different matrices. Loaders must not
+    # re-tie them (see load_model_from_checkpoint in src/generate.py).
+    #
     # Wrapping at the block level means:
     #   - Each all-gather/reduce-scatter moves ~50M params (~100 MB fp16).
     #   - Blocks can be prefetched: while block N is running forward, block N+1's

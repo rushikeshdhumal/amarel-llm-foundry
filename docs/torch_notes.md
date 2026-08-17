@@ -270,13 +270,39 @@ if save_best_t.item():
 
 ---
 
-## 12. FSDP export: gather with `summon_full_params`, do not unwrap wrappers
+## 12. FSDP export: never mutate the module tree after `dcp.load()`
 
-**What happened:** Phase 3 DCP export produced a `model.pt` that loaded without error (keys and shapes matched) but eval perplexity was ~1800 vs a train loss of 0.58. A follow-up export that unwrapped `CheckpointWrapper` modules before `FULL_STATE_DICT` hung until the SLURM time limit (`RendezvousTimeoutError`, then `CANCELLED DUE TO TIME LIMIT`).
+**What happened:** An export that unwrapped `CheckpointWrapper` modules before taking a `FULL_STATE_DICT` hung until the SLURM time limit (`RendezvousTimeoutError`, then `CANCELLED DUE TO TIME LIMIT`).
 
-**Why:**
-- Training applies `apply_activation_checkpointing` *after* FSDP wrapping. `dcp.load()` needs that same tree.
-- `FSDP.state_dict()` with `FULL_STATE_DICT` walks through `CheckpointWrapper` and can emit full-sized tensors with the right names but wrong values.
-- Mutating `_fsdp_wrapped_module` / replacing wrappers after load invalidates FSDP handles, so the next collective deadlocks.
+**Why:** Training applies `apply_activation_checkpointing` *after* FSDP wrapping, and `dcp.load()` needs that same tree. Replacing `_fsdp_wrapped_module` or stripping wrappers after load invalidates FSDP's handles, so the next collective never completes on all ranks.
 
-**Fix:** Leave the module tree untouched. After `dcp.load()`, gather with `FSDP.summon_full_params(..., rank0_only=True, offload_to_cpu=True)`, strip wrapper prefixes from keys, and `torch.save` that dict. Do not construct a second 1.3B `GPT` on rank 0 just to re-save.
+**Fix:** Leave the module tree untouched. Rebuild FSDP with the identical wrap and shard policy, `dcp.load()`, then gather with `get_model_state_dict(options=StateDictOptions(full_state_dict=True, cpu_offload=True))` and `torch.save` the result. Do not construct a second 1.3B `GPT` on rank 0 just to re-save.
+
+**Note:** The eval perplexity of ~1800 that first prompted this investigation was *not* an export bug — see section 13. Two rewrites of the gather path chased a symptom whose cause was in the loader. The tell was that all three exports produced a bit-identical eval loss of 7.5015; structurally different gather paths cannot agree to four decimals unless the differing tensor never reaches the forward pass.
+
+---
+
+## 13. FSDP silently unties weight-tied embeddings
+
+**What happened:** Phase 3 (1.3B, FSDP) reached train loss 0.58 but evaluated at val loss 7.5015 / ppl 1810 — far better than random (`ln 50257` = 10.82) yet nowhere near Phase 2's 0.95. The exported `model.pt` was correct all along.
+
+**Why:** `GPT.__init__` ties the head to the embedding (`lm_head.weight = tok_emb.weight`, one shared tensor). FSDP does not preserve that:
+
+- `size_based_auto_wrap_policy(min_num_params=100_000)` wraps `tok_emb` and `lm_head` as separate units — at `n_embd=2048` each is 103M params, far above the threshold.
+- FSDP only marks original parameters as already-flattened when `use_orig_params=True`. In `_flat_param.py::FlatParameter._init_metadata`, the params list is `_convert_to_params(...) if use_orig_params else None`, and `_set_fsdp_flattened` is only called when that list is non-`None`.
+- With the default `use_orig_params=False`, `tok_emb` is wrapped first and its `weight` attribute is replaced by a plain tensor view. When FSDP reaches `lm_head`, `_get_orig_params` still sees an unmarked `nn.Parameter` and flattens it into a **second, independent** `FlatParameter`.
+
+Both halves shard and sync correctly, so training is sound — but the model is one embedding table larger than the tied count (1.416B, not 1.313B) and the checkpoint holds two different matrices. Ours had diverged to `max|lm_head - tok_emb| = 4.06`.
+
+The damage was done by the loader, which re-tied unconditionally:
+
+```python
+# src/generate.py, before the fix
+model.lm_head.weight = model.tok_emb.weight
+```
+
+That discards the trained head and substitutes the input embedding, giving a trained trunk with a head that was never trained as one. Phase 1 and 2 were unaffected because single-GPU and DDP keep the tie, making the line a no-op.
+
+**Fix:** Decide from the checkpoint, not from the architecture. Compare `tok_emb.weight` and `lm_head.weight`; if they differ, untie the model *before* `load_state_dict` — on a tied model both keys address the same storage, so the later key silently overwrites the earlier one. Only re-tie when the checkpoint is genuinely tied or omits the head.
+
+**Rule of thumb:** Any invariant a module establishes at construction time (weight tying, buffer aliasing, parameter groups) is a candidate for silent breakage under FSDP. Assert it after wrapping rather than assuming it at load time. A diagnostic that reports "unique params" by *assuming* tying — as `count_unique_params` did — will hide exactly this class of bug.
